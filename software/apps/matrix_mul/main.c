@@ -35,7 +35,7 @@
 #define B_b 1
 #define B_c 16
 // Enable verbose printing
-// #define VERBOSE
+#define VERBOSE
 
 int32_t volatile init __attribute__((section(".l2"))) = 0;
 int32_t a[M * N] __attribute__((section(".l1")));
