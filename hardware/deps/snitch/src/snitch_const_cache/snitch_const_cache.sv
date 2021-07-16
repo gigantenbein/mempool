@@ -4,7 +4,6 @@
 
 // Florian Zaruba <zarubaf@iis.ee.ethz.ch>
 
-`include "axi/typedef.svh"
 
 /// Serve bufferable read memory requests from a constant cache.
 /// In more specific AXI terms:
@@ -50,6 +49,9 @@ module snitch_const_cache #(
   output mst_req_t axi_mst_req_o,
   input  mst_rsp_t axi_mst_rsp_i
 );
+
+  `include "axi/typedef.svh"
+  `include "common_cells/registers.svh"
   import cf_math_pkg::idx_width;
 
   // Check for supported parameters
@@ -228,21 +230,27 @@ module snitch_const_cache #(
   logic                         handler_rsp_valid;
   logic                         handler_rsp_ready;
 
-  logic [CFG.LINE_WIDTH-1:0]    in_rsp_data  , in_rsp_data_d, in_rsp_data_q;
-  logic                         in_rsp_error  , in_rsp_error_d, in_rsp_error_q;
-  logic [CFG.ID_WIDTH_RESP-1:0] in_rsp_id  , in_rsp_id_d, in_rsp_id_q;
-  logic                         in_rsp_valid  , in_rsp_valid_d, in_rsp_valid_q;
-  logic                         in_rsp_ready_d, in_rsp_ready_q;
+  logic [CFG.LINE_WIDTH-1:0]    in_rsp_data, in_rsp_data_q;
+  logic                         in_rsp_error, in_rsp_error_q;
+  logic [CFG.ID_WIDTH_RESP-1:0] in_rsp_id, in_rsp_id_d, in_rsp_id_q;
+  logic                         in_rsp_valid;
+  logic                         in_rsp_ready;
 
-  logic [CFG.ID_WIDTH_RESP-1:0] pop_counter;
-  logic in_rsp_empty;
+  logic                         in_rsp_empty;
 
-  logic                         axi_id_fifo_full;
   id_t                          r_id;
 
   localparam WORD_OFFSET = idx_width(LineWidth/AxiDataWidth); // AXI-word offset within cache line
-  logic [2**AxiIdWidth:0][WORD_OFFSET-1:0] addr_offset;
-  logic [2**AxiIdWidth:0] in_flight;
+
+  // Store some AXI metadata for the response
+  typedef struct packed {
+    logic [CFG.LINE_ALIGN-1:0] addr; // Store the offset in the cache line minus the byte offset
+    axi_pkg::len_t             len; // Store the length of the burst
+    axi_pkg::size_t            size; // Store the size of the beats
+    logic                      valid; // Metadata is valid --> a transaction is already in flight
+  } metadata_t;
+
+  metadata_t [2**AxiIdWidth:0] metadata;
 
   // AW, W, B channel --> Never used tie off
   assign demux_rsp[Cache].aw_ready = 1'b0;
@@ -252,42 +260,39 @@ module snitch_const_cache #(
   // AR channel --> Ready if cache is ready and no request with the same ID is in flight
   assign in_id = demux_req[Cache].ar.id;
   assign in_addr = demux_req[Cache].ar.addr >> CFG.LINE_ALIGN << CFG.LINE_ALIGN;
-  assign in_valid = demux_req[Cache].ar_valid & ~in_flight[in_id];
-  assign demux_rsp[Cache].ar_ready = in_ready & ~in_flight[in_id];
+  assign in_valid = demux_req[Cache].ar_valid & ~metadata[in_id].valid; // Suppress handshake if transaction in flight
+  assign demux_rsp[Cache].ar_ready = in_ready & ~metadata[in_id].valid; // Suppress handshake if transaction in flight
   // R channel
   assign demux_rsp[Cache].r.id = r_id;
-  assign demux_rsp[Cache].r.data = in_rsp_data_q >> (addr_offset[r_id] * AxiDataWidth);
+  assign demux_rsp[Cache].r.data = in_rsp_data_q >> (metadata[r_id].addr[$clog2(AxiDataWidth/8)+:WORD_OFFSET] * AxiDataWidth);
   assign demux_rsp[Cache].r.resp = in_rsp_error_q; // This response is already an AXI response.
-  assign demux_rsp[Cache].r.last = 1'b1;
+  assign demux_rsp[Cache].r.last = ~(|metadata[r_id].len);
   assign demux_rsp[Cache].r.user = '0;
   assign demux_rsp[Cache].r_valid = ~in_rsp_empty;
-  assign in_rsp_ready_d = demux_req[Cache].r_ready; // Cache assumes it's always one?
-
+  // Technically, we could already give the ready once in_rsp_id_q is onehot, but we need to make sure to handle fetching the ID properly
+  assign in_rsp_ready = in_rsp_empty;
 
   // Store Metadata:
   //   - Address offset to realign data in response
-  if (LineWidth/AxiDataWidth <= 1) begin : set_metadata
-    assign addr_offset = '0; // Ignore the byte offset
-  end else begin : set_metadata
-    always_ff @(posedge clk_i or negedge rst_ni) begin : proc_addr_offset
-      if(~rst_ni) begin
-        addr_offset <= '0;
-      end else if (in_valid && in_ready) begin
-        addr_offset[in_id] <= demux_req[Cache].ar.addr[$clog2(AxiDataWidth/8)+:WORD_OFFSET];
-      end
-    end
-  end
-
-  // Track which IDs already have a request in flight
-  always_ff @(posedge clk_i or negedge rst_ni) begin : proc_in_flight
+  //   - Burst length to count number of responses
+  //   - Beat size to correctly increment beats
+  //   - Valid to see if a transaction is already in flight
+  always_ff @(posedge clk_i or negedge rst_ni) begin : proc_metadata
     if(~rst_ni) begin
-      in_flight <= '0;
+      metadata <= '0;
     end else begin
-      if (in_valid && in_ready) begin
-        in_flight[in_id] <= 1'b1;
+      if (demux_rsp[Cache].r_valid && demux_req[Cache].r_ready) begin
+        metadata[r_id].addr <= metadata[r_id].addr + (1 << metadata[r_id].size);
+        metadata[r_id].len  <= metadata[r_id].len - 1;
+        if (demux_rsp[Cache].r.last) begin
+          metadata[r_id].valid <= 1'b0;
+        end
       end
-      if (demux_rsp[Cache].r_valid && demux_req[Cache].r_ready && demux_rsp[Cache].r.last) begin
-        in_flight[r_id] <= 1'b0;
+      if (in_valid && in_ready) begin
+        metadata[in_id].addr  <= demux_req[Cache].ar.addr[0+:CFG.LINE_ALIGN];
+        metadata[in_id].len   <= demux_req[Cache].ar.len;
+        metadata[in_id].size  <= demux_req[Cache].ar.size;
+        metadata[in_id].valid <= 1'b1;
       end
     end
   end
@@ -302,36 +307,17 @@ module snitch_const_cache #(
   );
 
   always_comb begin
-    in_rsp_data_d  = in_rsp_data_q;
-    in_rsp_error_d = in_rsp_error_q;
-    in_rsp_id_d    = in_rsp_id_q;
-    in_rsp_valid_d = in_rsp_valid_q;
-    if (in_rsp_valid && in_rsp_empty) begin
-      in_rsp_data_d  = in_rsp_data;
-      in_rsp_error_d = in_rsp_error;
-      in_rsp_id_d    = in_rsp_id;
-      in_rsp_valid_d = in_rsp_valid;
-    end else if (demux_rsp[Cache].r_valid && in_rsp_ready_d) begin
+    in_rsp_id_d = in_rsp_id_q;
+    if (in_rsp_valid && in_rsp_ready) begin
+      in_rsp_id_d = in_rsp_id;
+    end else if (demux_rsp[Cache].r_valid && demux_req[Cache].r_ready && demux_rsp[Cache].r.last) begin
       in_rsp_id_d = in_rsp_id_q & ~(1 << r_id);
     end
   end
 
-
-
-  always_ff @(posedge clk_i) begin : proc_queue
-    if (~rst_ni) begin
-      pop_counter    = '0;
-      in_rsp_data_q  = '0;
-      in_rsp_error_q = '0;
-      in_rsp_id_q    = '0;
-      in_rsp_valid_q = '0;
-    end else begin
-      in_rsp_data_q  = in_rsp_data_d;
-      in_rsp_error_q = in_rsp_error_d;
-      in_rsp_id_q    = in_rsp_id_d;
-      in_rsp_valid_q = in_rsp_valid_d;
-    end
-  end : proc_queue
+  `FFL(in_rsp_data_q, in_rsp_data, (in_rsp_valid && in_rsp_ready), '0);
+  `FFL(in_rsp_error_q, in_rsp_error, (in_rsp_valid && in_rsp_ready), '0);
+  `FF(in_rsp_id_q, in_rsp_id_d, '0);
 
   snitch_icache_lookup_parallel #(CFG) i_lookup (
     .clk_i,
@@ -382,7 +368,7 @@ module snitch_const_cache #(
     .in_rsp_error_o  ( in_rsp_error       ),
     .in_rsp_id_o     ( in_rsp_id          ),
     .in_rsp_valid_o  ( in_rsp_valid       ),
-    .in_rsp_ready_i  ( in_rsp_empty       ), // TODO: Technically, onehot is enough
+    .in_rsp_ready_i  ( in_rsp_ready       ),
 
     .write_addr_o    ( write_addr         ),
     .write_set_o     ( write_set          ),
