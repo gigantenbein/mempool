@@ -130,11 +130,13 @@ module axi_hier_interco #(
       .mst_resp_i  (int_resp  )
     );
 
-    localparam addr_t CachedRegionStart = addr_t'(32'h8000_0000);
-    localparam addr_t CachedRegionEnd   = addr_t'(32'h8000_2460);
+    addr_t CachedRegionStart [1];
+    addr_t CachedRegionEnd [1];
+    assign CachedRegionStart = '{addr_t'(32'h8000_0000)};
+    assign CachedRegionEnd   = '{addr_t'(32'h8000_2460)};
 
     snitch_const_cache #(
-      .LineWidth    ( 4*DataWidth    ),
+      .LineWidth    ( 2*DataWidth    ),
       .LineCount    ( 128            ),
       .SetCount     ( 1              ),
       .AxiAddrWidth ( AddrWidth      ),
@@ -152,8 +154,8 @@ module axi_hier_interco #(
       .rst_ni        ( rst_ni              ),
       .flush_valid_i ( 1'b0                ),
       .flush_ready_o ( /*unused*/          ),
-      .start_addr_i  ( {CachedRegionStart} ),
-      .end_addr_i    ( {CachedRegionEnd}   ),
+      .start_addr_i  ( CachedRegionStart   ),
+      .end_addr_i    ( CachedRegionEnd     ),
       .axi_slv_req_i ( int_req             ),
       .axi_slv_rsp_o ( int_resp            ),
       .axi_mst_req_o ( cache_req           ),
