@@ -52,4 +52,3 @@ void mempool_barrier(uint32_t num_cores, uint32_t cycles) {
       mempool_wait(cycles);
   }
 }
-
