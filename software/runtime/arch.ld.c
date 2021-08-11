@@ -21,7 +21,7 @@ SECTIONS {
 
   // Stack size
   __stack_start = __l1_start;
-  __stack_end = __l1_start + (NUM_CORES * 0x400);
+  __stack_end = __l1_start + (NUM_CORES * 0x200);
 
   // Hardware register location
   eoc_reg                = 0x40000000;
