@@ -199,6 +199,7 @@ module mempool_cc
   // Tracer
   // --------------------------
   // pragma translate_off
+  logic f_open = 1'b0;
   int f;
   string fn;
   logic [63:0] cycle;
@@ -207,7 +208,6 @@ module mempool_cc
   always_ff @(posedge rst_i) begin
     if(rst_i) begin
       $sformat(fn, "trace_hart_%04.0f.dasm", hart_id_i);
-      f = $fopen(fn, "w");
       $display("[Tracer] Logging Hart %d to %s", hart_id_i, fn);
     end
   end
@@ -274,6 +274,11 @@ module mempool_cc
 
           $sformat(trace_entry, "%t %8d 0x%h DASM(%h) #; %s\n",
               $time, cycle, i_snitch.pc_q, i_snitch.inst_data_i, extras_str);
+          // Is the file open?
+          if (!f_open) begin
+            f_open <= 1'b1;
+            f = $fopen(fn, "w");
+          end
           $fwrite(f, trace_entry);
         end
 
@@ -313,7 +318,8 @@ module mempool_cc
     end
 
   final begin
-    $fclose(f);
+    if (f_open)
+      $fclose(f);
   end
   // pragma translate_on
 
