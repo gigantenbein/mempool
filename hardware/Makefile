@@ -53,7 +53,9 @@ endif
 
 QUESTASIM_HOME ?= /usr/pack/questa-$(questa_version)-kgf/questasim
 
-questa_args += -voptargs=+acc
+ifneq ($(config), terapool)
+	questa_args += -voptargs=+acc
+endif
 ifdef app
 	preload ?= "$(app_path)/$(app)"
 endif
