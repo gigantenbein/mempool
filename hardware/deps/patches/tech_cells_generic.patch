@@ -2,15 +2,15 @@ diff --git b/hardware/deps/tech_cells_generic/Bender.yml a/hardware/deps/tech_ce
 index 877c88e..4a0e5bf 100644
 --- b/hardware/deps/tech_cells_generic/Bender.yml
 +++ a/hardware/deps/tech_cells_generic/Bender.yml
-@@ -13,25 +13,25 @@ sources:
- 
+@@ -13,23 +13,23 @@ sources:
+
    - target: all(fpga, xilinx)
      files:
 -      - src/deprecated/cluster_clk_cells_xilinx.sv
 +      # - src/deprecated/cluster_clk_cells_xilinx.sv
        - src/fpga/tc_clk_xilinx.sv
        - src/fpga/tc_sram_xilinx.sv
- 
+
    - target: not(all(fpga, xilinx))
      files:
        # Level 0
@@ -19,7 +19,7 @@ index 877c88e..4a0e5bf 100644
 +      # - src/deprecated/cluster_clk_cells.sv
 +      # - src/deprecated/pulp_clk_cells.sv
        - src/rtl/tc_clk.sv
- 
+
    - target: not(synthesis)
      files:
 -      - src/deprecated/cluster_pwr_cells.sv
@@ -35,7 +35,7 @@ index 877c88e..4a0e5bf 100644
 +      # - src/deprecated/pulp_buffer.sv
 +      # - src/deprecated/pulp_pwr_cells.sv
        - src/tc_pwr.sv
- 
+
    - target: test
 diff --git b/hardware/deps/tech_cells_generic/scripts/run_vsim.sh a/hardware/deps/tech_cells_generic/scripts/run_vsim.sh
 index 34f2e22..b860912 100755
@@ -75,7 +75,46 @@ index 53530e0..82fe1f7 100644
        for (int i = 0; i < NumPorts; i++) begin
          r_addr_q[i] <= {AddrWidth{1'b0}};
          // initialize the read output register for each port
-@@ -204,4 +206,69 @@ module tc_sram #(
+@@ -149,12 +151,14 @@ module tc_sram #(
+       for (int unsigned i = 0; i < NumPorts; i++) begin
+         if (req_i[i]) begin
+           if (we_i[i]) begin
++            `ifndef VERILATOR
+             // update value when write is set at clock
+             for (int unsigned j = 0; j < DataWidth; j++) begin
+               if (be_i[i][j/ByteWidth]) begin
+                 sram[addr_i[i]][j] <= wdata_i[i][j];
+               end
+             end
++            `endif
+           end else begin
+             // otherwise update read address for subsequent non request cycles
+             r_addr_q[i] <= addr_i[i];
+@@ -164,6 +168,23 @@ module tc_sram #(
+     end // if !rst_ni
+   end
+
++  `ifdef VERILATOR
++  for (genvar i = 0; i < NumPorts; i++) begin
++    // update value when write is set at clock
++    for (genvar j = 0; j < DataWidth; j++) begin
++      always_ff @(posedge clk_i or negedge rst_ni) begin
++        if (!rst_ni) begin
++        end else begin
++          if (req_i[i])
++            if (we_i[i])
++              if (be_i[i][j/ByteWidth])
++                sram[addr_i[i]][j] <= wdata_i[i][j];
++        end
++      end
++    end
++  end
++  `endif
++
+ // Validate parameters.
+ // pragma translate_off
+ `ifndef VERILATOR
+@@ -204,4 +225,69 @@ module tc_sram #(
  `endif
  `endif
  // pragma translate_on
@@ -109,10 +148,10 @@ index 53530e0..82fe1f7 100644
 +  // Returns 1 (true) for success, 0 (false) for errors.
 +  export "DPI-C" function simutil_set_mem;
 +
-+  function int simutil_set_mem(input int index, input bit [255:0] val);
++  function int simutil_set_mem(input int index, input bit [1023:0] val);
 +
-+    // Function will only work for memories <= 256 bits
-+    if (DataWidth > 256) begin
++    // Function will only work for memories <= 1024 bits
++    if (DataWidth > 1024) begin
 +      return 0;
 +    end
 +
@@ -127,10 +166,10 @@ index 53530e0..82fe1f7 100644
 +  // Function for getting a specific element in |sram|
 +  export "DPI-C" function simutil_get_mem;
 +
-+  function int simutil_get_mem(input int index, output bit [255:0] val);
++  function int simutil_get_mem(input int index, output bit [1023:0] val);
 +
-+    // Function will only work for memories <= 256 bits
-+    if (DataWidth > 256) begin
++    // Function will only work for memories <= 1024 bits
++    if (DataWidth > 1024) begin
 +      return 0;
 +    end
 +
