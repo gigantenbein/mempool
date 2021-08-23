@@ -152,6 +152,7 @@ module axi_hier_interco #(
     ) i_snitch_const_cache (
       .clk_i         ( clk_i               ),
       .rst_ni        ( rst_ni              ),
+      .enable_i      ( 1'b1                ),
       .flush_valid_i ( 1'b0                ),
       .flush_ready_o ( /*unused*/          ),
       .start_addr_i  ( CachedRegionStart   ),

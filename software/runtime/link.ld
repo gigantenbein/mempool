@@ -27,9 +27,12 @@ SECTIONS {
 
   /* Instructions on L2 */
   .text : {
+    __text_start = .;
     *(.text.init)
+    *(.text.*)
     *(.text)
     . = ALIGN(0x40);
+    __text_end = .;
   } > l2
 
   /* Data on L2 */

@@ -42,7 +42,7 @@ verilator_top   ?= mempool_tb_verilator
 # Python
 python          ?= python3
 # Enable tracing
-snitch_trace    ?= 0
+snitch_trace    ?= 1
 
 # Check if the specified QuestaSim version exists
 ifeq (, $(shell which $(questa_cmd)))
