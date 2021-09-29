@@ -18,40 +18,38 @@
 queue_t *queue;
 
 int main() {
-    uint32_t core_id = mempool_get_core_id();
-    uint32_t num_cores = mempool_get_core_count();
-    // Initialize synchronization variables
-    mempool_barrier_init(core_id);
+  uint32_t core_id = mempool_get_core_id();
+  uint32_t num_cores = mempool_get_core_count();
+  // Initialize synchronization variables
+  mempool_barrier_init(core_id);
 
-    // initializes the heap allocator
-    mempool_init(core_id, num_cores);
+  // initializes the heap allocator
+  mempool_init(core_id, num_cores);
 
-    if (core_id == 0) {
-      queue = initialize_queue();
-      if (queue == NULL) {
-        printf("queue initialization failed\n");
-        return 1;
-      }
+  if (core_id == 0) {
+    queue = initialize_queue();
+    if (queue == NULL) {
+      printf("queue initialization failed\n");
+      return 1;
     }
+  }
 
-    mempool_barrier(num_cores);
-    if (core_id == 0) {
-      enqueue(queue, 1);
-      enqueue(queue, 2);
-      enqueue(queue, 3);
-      enqueue(queue, 4);
-      enqueue(queue, 5);
-    }
+  mempool_barrier(num_cores);
+  if (core_id == 0) {
+    enqueue(queue, 1);
+    enqueue(queue, 2);
+    enqueue(queue, 3);
+    enqueue(queue, 4);
+    enqueue(queue, 5);
+  } else if (core_id == 1) {
+    printf("dequeue %3d \n", dequeue(queue));
+    printf("dequeue %3d \n", dequeue(queue));
+    printf("dequeue %3d \n", dequeue(queue));
+    printf("dequeue %3d \n", dequeue(queue));
+    printf("dequeue %3d \n", dequeue(queue));
+  }
+  // wait until all cores have finished
+  mempool_barrier(num_cores);
 
-    else if (core_id == 1) {
-      printf("dequeue %3d \n", dequeue(queue));
-      printf("dequeue %3d \n", dequeue(queue));
-      printf("dequeue %3d \n", dequeue(queue));
-      printf("dequeue %3d \n", dequeue(queue));
-      printf("dequeue %3d \n", dequeue(queue));
-    }
-    // wait until all cores have finished
-    mempool_barrier(num_cores);
-
-    return 0;
+  return 0;
 }
