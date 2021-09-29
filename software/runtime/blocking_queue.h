@@ -23,19 +23,19 @@
 #include "amo_mutex.h"
 #include "printf.h"
 
-typedef struct node_t  node_t;
+typedef struct node_t node_t;
 typedef struct queue_t queue_t;
 
 struct node_t {
-    int32_t value;
-    node_t* next;
+  int32_t value;
+  node_t *next;
 };
 
 struct queue_t {
-    node_t* head;
-    node_t* tail;
-    amo_mutex_t* head_lock;
-    amo_mutex_t* tail_lock;
+  node_t *head;
+  node_t *tail;
+  amo_mutex_t *head_lock;
+  amo_mutex_t *tail_lock;
 };
 
 //

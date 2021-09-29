@@ -26,15 +26,15 @@ typedef uint32_t volatile amo_mutex_t;
 //
 // @return  Value previously stored in memory.
 //
-static inline uint32_t amo_swap(void volatile *const address, uint32_t value)
-    {
-    uint32_t ret;
-    asm volatile("" : : : "memory");
-    asm volatile("amoswap.w  %0, %1, (%2)" : "=r"(ret) : "r"(value), "r"(address));
-    asm volatile("" : : : "memory");
-    return ret;
+static inline uint32_t amo_swap(void volatile *const address, uint32_t value) {
+  uint32_t ret;
+  asm volatile("" : : : "memory");
+  asm volatile("amoswap.w  %0, %1, (%2)"
+               : "=r"(ret)
+               : "r"(value), "r"(address));
+  asm volatile("" : : : "memory");
+  return ret;
 }
-
 
 //
 // Try to acquire a specified lock.
@@ -43,8 +43,8 @@ static inline uint32_t amo_swap(void volatile *const address, uint32_t value)
 //
 // @return  0 if the mutex was successfully locked.
 //
-static inline uint32_t amo_try_lock(amo_mutex_t *const mutex)    {
-    return amo_swap(mutex, 1);
+static inline uint32_t amo_try_lock(amo_mutex_t *const mutex) {
+  return amo_swap(mutex, 1);
 }
 
 //
@@ -54,12 +54,11 @@ static inline uint32_t amo_try_lock(amo_mutex_t *const mutex)    {
 // @param   mutex       A pointer to the lock's memory location.
 // @param   backoff       A pointer to the lock's memory location.
 //
-static inline void amo_lock_mutex(amo_mutex_t *mutex){
-    uint32_t backoff = BACKOFF * ACTIVE_CORES;
-    while(amo_try_lock(mutex))
-    {
-      mempool_wait(backoff);
-    }
+static inline void amo_lock_mutex(amo_mutex_t *mutex) {
+  uint32_t backoff = BACKOFF * ACTIVE_CORES;
+  while (amo_try_lock(mutex)) {
+    mempool_wait(backoff);
+  }
 }
 
 //
@@ -67,8 +66,8 @@ static inline void amo_lock_mutex(amo_mutex_t *mutex){
 //
 // @param   mutex       A pointer to the mutex to be unlocked.
 //
-static inline void amo_unlock_mutex(amo_mutex_t *const mutex)    {
-    amo_swap(mutex, 0);
+static inline void amo_unlock_mutex(amo_mutex_t *const mutex) {
+  amo_swap(mutex, 0);
 }
 
 //
