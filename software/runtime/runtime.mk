@@ -84,8 +84,7 @@ else
 endif
 
 LINKER_SCRIPT ?= $(ROOT_DIR)/arch.ld
-RUNTIME ?= $(ROOT_DIR)/crt0.S.o $(ROOT_DIR)/printf.c.o $(ROOT_DIR)/string.c.o $(ROOT_DIR)/synchronization.c.o $(ROOT_DIR)/serial.c.o $(ROOT_DIR)/alloc.c.o\
-$(ROOT_DIR)/amo_mutex.c.o
+RUNTIME ?= $(ROOT_DIR)/crt0.S.o $(ROOT_DIR)/printf.c.o $(ROOT_DIR)/string.c.o $(ROOT_DIR)/synchronization.c.o $(ROOT_DIR)/serial.c.o $(ROOT_DIR)/alloc.c.o $(ROOT_DIR)/amo_mutex.c.o $(ROOT_DIR)/blocking_queue.c.o
 
 # For unit tests
 RISCV_CCFLAGS_TESTS ?= $(RISCV_FLAGS_GCC) $(RISCV_FLAGS_COMMON_TESTS) -fvisibility=hidden -nostdlib $(RISCV_LDFLAGS)
