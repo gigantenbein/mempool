@@ -12,11 +12,10 @@
 #include "runtime.h"
 #include "synchronization.h"
 #include "blocking_queue.h"
-#include "amo_mutex.h"
 
 #define NUMBER_OF_NODES 16
 
-queue_t* queue_;
+queue_t *queue;
 
 int main() {
     uint32_t core_id = mempool_get_core_id();
@@ -28,24 +27,28 @@ int main() {
     mempool_init(core_id, num_cores);
 
     if (core_id == 0) {
-        queue_ = initialize_queue();
-        if (queue_ == NULL) { printf("queue initialization failed\n"); return 1; }
+      queue = initialize_queue();
+      if (queue == NULL) {
+        printf("queue initialization failed\n");
+        return 1;
+      }
     }
-    
+
     mempool_barrier(num_cores);
     if (core_id == 0) {
-        enqueue(queue_, 1);
-        /* enqueue(queue_, 2); */
-        /* enqueue(queue_, 3); */
-        /* enqueue(queue_, 4); */
-        /* enqueue(queue_, 5); */
+      enqueue(queue, 1);
+      enqueue(queue, 2);
+      enqueue(queue, 3);
+      enqueue(queue, 4);
+      enqueue(queue, 5);
     }
+
     else if (core_id == 1) {
-        printf("dequeue %3d \n", dequeue(queue_));
-        printf("dequeue %3d \n", dequeue(queue_));
-        printf("dequeue %3d \n", dequeue(queue_));
-        printf("dequeue %3d \n", dequeue(queue_));
-        printf("dequeue %3d \n", dequeue(queue_));
+      printf("dequeue %3d \n", dequeue(queue));
+      printf("dequeue %3d \n", dequeue(queue));
+      printf("dequeue %3d \n", dequeue(queue));
+      printf("dequeue %3d \n", dequeue(queue));
+      printf("dequeue %3d \n", dequeue(queue));
     }
     // wait until all cores have finished
     mempool_barrier(num_cores);
