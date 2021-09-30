@@ -36,6 +36,8 @@ package mempool_pkg;
   localparam integer unsigned ByteOffset       = $clog2(BeWidth);
   localparam integer unsigned BankingFactor    = 4;
   localparam bit              LrScEnable       = 1'b1;
+  // LrWaitQueueSize = 1 corresponds to LR/SC
+  localparam integer unsigned LrWaitQueueSize  = `ifdef LRWAIT_QUEUE_SIZE `LRWAIT_QUEUE_SIZE `else 1 `endif;
   localparam integer unsigned TCDMSizePerBank  = 1024; // [B]
   localparam integer unsigned NumBanks         = NumCores * BankingFactor;
   localparam integer unsigned NumBanksPerTile  = NumBanks / NumTiles;
