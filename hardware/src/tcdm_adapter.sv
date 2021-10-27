@@ -94,7 +94,10 @@ module tcdm_adapter
   logic        sc_q;
   logic        first_lr;
   logic        send_lr_d, send_lr_q;
-  
+
+  metadata_t dummy_in_meta_o;
+  logic [DataWidth-1:0] dummy_in_rdata_o;
+    
   logic        lr_available_d, lr_available_q;
 
   // register data stored by SC to pass to next LR in queue
@@ -109,8 +112,11 @@ module tcdm_adapter
   // only load the metadata if it is the first LR
   assign meta_valid_in = (amo_op_t'(in_amo_i) == AMOLR) ?
                          first_lr :
-                         (in_valid_i && in_ready_o && !in_write_i) || send_lr_q;
-    
+                         (in_valid_i && in_ready_o && !in_write_i);
+
+  assign in_meta_o = lr_available_d  ? queue_oup_data_o : dummy_in_meta_o;
+  assign in_rdata_o = lr_available_d ? sc_wdata_q : dummy_in_rdata_o;
+      
   // unique core identifier, does not necessarily match core_id
   logic [CoreIdWidth:0] unique_core_id;  
 
@@ -123,10 +129,10 @@ module tcdm_adapter
     .rst_ni (rst_ni                                              ),
     .valid_i(meta_valid_in),
     .ready_o(meta_ready                                          ),
-    .data_i (send_lr_q ? queue_oup_data_o : in_meta_i            ),
+    .data_i (in_meta_i            ),
     .valid_o(meta_valid                                          ),
     .ready_i(pop_resp                                            ),
-    .data_o (in_meta_o                                           )
+    .data_o (dummy_in_meta_o                                           )
   );
 
   // Store response if it's not accepted immediately
@@ -140,7 +146,7 @@ module tcdm_adapter
     .data_i    (out_rdata  ),
     .valid_i   (out_gnt    ),
     .ready_o   (rdata_ready),
-    .data_o    (in_rdata_o ),
+    .data_o    (dummy_in_rdata_o ),
     .valid_o   (rdata_valid),
     .ready_i   (pop_resp   )
   );
@@ -158,7 +164,7 @@ module tcdm_adapter
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
-  assign in_valid_o = meta_valid && rdata_valid;
+  assign in_valid_o = meta_valid && rdata_valid || lr_available_q;
   
   // Only pop the data from the registers once both registers are ready
   // If  a LR happens and the response is held back, pop the metadata immediately
@@ -166,7 +172,7 @@ module tcdm_adapter
   assign pop_resp   = in_ready_i && in_valid_o;
   
   // Generate out_gnt one cycle after sending read request to the bank
-  `FFARN(out_gnt, (out_req_o && !out_write_o) || sc_successful_d || send_lr_d, 1'b0, clk_i, rst_ni);
+  `FFARN(out_gnt, (out_req_o && !out_write_o) || sc_successful_d, 1'b0, clk_i, rst_ni);
 
   // ----------------
   // LR/SC
@@ -218,7 +224,8 @@ module tcdm_adapter
       first_lr = 1'b0;
 
       send_lr_d = 1'b0;
-      lr_available_d = lr_available_q;
+      lr_available_d = 1'b0;
+
             
       queue_oup_req_i = 1'b0;
       queue_oup_pop_i = 1'b0;
@@ -285,17 +292,9 @@ module tcdm_adapter
           lr_available_d = sc_successful_q;
         end
       end
-      
-      // wait for output to be free
-      if (lr_available_q && !rdata_valid) begin
-        send_lr_d = 1'b1;
-        lr_available_d = 1'b0;
-      end
-      // query for metadata to be sent
-      if (send_lr_q) begin
+      if (lr_available_q) begin
         queue_oup_req_i = 1;
       end
-      
     end // always_comb
   // end else begin : disable_lrcs
   //   assign sc_q = 1'b0;
@@ -309,7 +308,8 @@ module tcdm_adapter
 
   always_comb begin
     // feed-through
-    in_ready_o = in_valid_o && !in_ready_i ? 1'b0 : 1'b1;
+    // block new req when feeding out LR
+    in_ready_o = lr_available_d ? 1'b0 : (in_valid_o && !in_ready_i ? 1'b0 : 1'b1);
 
     // if LR, only load value when either first LR or SC happened    
     out_req_o   = (amo_op_t'(in_amo_i) == AMOLR) ? (first_lr && in_valid_i && in_ready_o) : (in_valid_i && in_ready_o);
