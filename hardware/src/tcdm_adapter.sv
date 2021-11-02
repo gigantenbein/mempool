@@ -93,10 +93,9 @@ module tcdm_adapter
   logic        sc_successful_d, sc_successful_q;
   logic        sc_q;
   logic        first_lr;
-  logic        send_lr_d, send_lr_q;
-
-  metadata_t dummy_in_meta_o;
-  logic [DataWidth-1:0] dummy_in_rdata_o;
+  logic        send_lr;
+  
+  metadata_t registered_in_meta_o;
     
   logic        lr_available_d, lr_available_q;
 
@@ -109,13 +108,15 @@ module tcdm_adapter
   
   metadata_t            queue_oup_data_o;
 
+  assign send_lr = (rdata_ready && lr_available_q);
+  
   // only load the metadata if it is the first LR
   assign meta_valid_in = (amo_op_t'(in_amo_i) == AMOLR) ?
                          first_lr :
                          (in_valid_i && in_ready_o && !in_write_i);
 
-  assign in_meta_o = lr_available_d  ? queue_oup_data_o : dummy_in_meta_o;
-  assign in_rdata_o = lr_available_d ? sc_wdata_q : dummy_in_rdata_o;
+  // if sending lr response, bypass metadata register
+  assign in_meta_o = send_lr  ? queue_oup_data_o : registered_in_meta_o;
       
   // unique core identifier, does not necessarily match core_id
   logic [CoreIdWidth:0] unique_core_id;  
@@ -125,46 +126,47 @@ module tcdm_adapter
     .T     (metadata_t),
     .Bypass(1'b0      )
   ) i_metadata_register (
-    .clk_i  (clk_i                                               ),
-    .rst_ni (rst_ni                                              ),
-    .valid_i(meta_valid_in),
-    .ready_o(meta_ready                                          ),
+    .clk_i  (clk_i                ),
+    .rst_ni (rst_ni               ),
+    .valid_i(meta_valid_in        ),
+    .ready_o(meta_ready           ),
     .data_i (in_meta_i            ),
-    .valid_o(meta_valid                                          ),
-    .ready_i(pop_resp                                            ),
-    .data_o (dummy_in_meta_o                                           )
+    .valid_o(meta_valid           ),
+    .ready_i(pop_resp             ),
+    .data_o (registered_in_meta_o )
   );
 
   // Store response if it's not accepted immediately
   fall_through_register #(
     .T(logic[DataWidth-1:0])
   ) i_rdata_register (
-    .clk_i     (clk_i      ),
-    .rst_ni    (rst_ni     ),
-    .clr_i     (1'b0       ),
-    .testmode_i(1'b0       ),
-    .data_i    (out_rdata  ),
-    .valid_i   (out_gnt    ),
-    .ready_o   (rdata_ready),
-    .data_o    (dummy_in_rdata_o ),
-    .valid_o   (rdata_valid),
-    .ready_i   (pop_resp   )
+    .clk_i     (clk_i               ),
+    .rst_ni    (rst_ni              ),
+    .clr_i     (1'b0                ),
+    .testmode_i(1'b0                ),
+    .data_i    (out_rdata           ),
+    .valid_i   (out_gnt || send_lr  ),
+    .ready_o   (rdata_ready         ),
+    .data_o    (in_rdata_o          ),
+    .valid_o   (rdata_valid         ),
+    .ready_i   (pop_resp            )
   );
-
    
 
   // if SC successful, store value to return in next cycle
 
-  `FFARN(sc_wdata_q, sc_wdata_d, 1'b0, clk_i, rst_ni);
+  `FFARN(sc_wdata_q, sc_wdata_d, '0, clk_i, rst_ni);
 
   // In case of a SC we must forward SC result from the cycle earlier.
   // In case of send_lr send the data of most recent store as LR response
   // Send lr occurs 1 cycle after successful SC iff queue for id not empty
-  assign out_rdata = sc_q ? $unsigned(!sc_successful_q) : (send_lr_q ? sc_wdata_q : out_rdata_i);
+  assign out_rdata = send_lr ?
+                     sc_wdata_q :
+                     (sc_q ?  $unsigned(!sc_successful_q) : out_rdata_i);
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
-  assign in_valid_o = meta_valid && rdata_valid || lr_available_q;
+  assign in_valid_o = (meta_valid || send_lr) && rdata_valid;
   
   // Only pop the data from the registers once both registers are ready
   // If  a LR happens and the response is held back, pop the metadata immediately
@@ -179,7 +181,6 @@ module tcdm_adapter
   // ----------------
 
   // if (LrScEnable) begin : gen_lrsc
-
                     
     id_queue #(
        .ID_WIDTH(AddrWidth),
@@ -210,8 +211,6 @@ module tcdm_adapter
        .oup_gnt_o        (queue_oup_gnt_o       )
      );
 
-
-    `FFARN(send_lr_q, send_lr_d, 1'b0, clk_i, rst_ni);
     `FFARN(lr_available_q, lr_available_d, 1'b0, clk_i, rst_ni);
   
     `FFARN(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
@@ -223,9 +222,7 @@ module tcdm_adapter
       queue_inp_req_i = 1'b0;
       first_lr = 1'b0;
 
-      send_lr_d = 1'b0;
-      lr_available_d = 1'b0;
-
+      lr_available_d = lr_available_q;
             
       queue_oup_req_i = 1'b0;
       queue_oup_pop_i = 1'b0;
@@ -295,6 +292,12 @@ module tcdm_adapter
       if (lr_available_q) begin
         queue_oup_req_i = 1;
       end
+
+      // if rdata_register has been consumed
+      // feed lr data
+      if (send_lr) begin
+        lr_available_d = 1'b0;
+      end
     end // always_comb
   // end else begin : disable_lrcs
   //   assign sc_q = 1'b0;
@@ -312,7 +315,8 @@ module tcdm_adapter
     in_ready_o = lr_available_d ? 1'b0 : (in_valid_o && !in_ready_i ? 1'b0 : 1'b1);
 
     // if LR, only load value when either first LR or SC happened    
-    out_req_o   = (amo_op_t'(in_amo_i) == AMOLR) ? (first_lr && in_valid_i && in_ready_o) : (in_valid_i && in_ready_o);
+    out_req_o   = (amo_op_t'(in_amo_i) == AMOLR) ?
+                  (first_lr && in_valid_i && in_ready_o) : (in_valid_i && in_ready_o);
     out_add_o   = in_address_i;
     out_write_o = in_write_i || (sc_successful_d && (amo_op_t'(in_amo_i) == AMOSC));
     out_wdata_o = in_wdata_i;
