@@ -17,6 +17,7 @@
  */
 typedef volatile uint32_t lr_sc_mutex_t;
 
+
 /**
  * Expose the load-reserved instruction. Loads a word from a specified
  * address and creates a reservation.
@@ -133,6 +134,14 @@ static inline int32_t compare_and_swap(volatile void* const address, uint32_t ol
     return store_conditional(address, new);
   else
     return -1;
+}
+
+static inline void lr_sc_add(volatile void* const address, uint32_t const summand)
+{
+  uint32_t value;
+  do {
+    value = load_reserved(address) + summand;
+  } while(store_conditional(address, value));
 }
 
 #endif
