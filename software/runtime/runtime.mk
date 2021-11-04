@@ -11,6 +11,7 @@ MEMPOOL_DIR := $(shell git rev-parse --show-toplevel 2>/dev/null || echo $$MEMPO
 # Include configuration
 include $(MEMPOOL_DIR)/config/config.mk
 
+
 INSTALL_DIR        ?= $(MEMPOOL_DIR)/install
 GCC_INSTALL_DIR    ?= $(INSTALL_DIR)/riscv-gcc
 LLVM_INSTALL_DIR   ?= $(INSTALL_DIR)/llvm
@@ -60,7 +61,7 @@ RISCV_STRIP   ?= $(RISCV_PREFIX)strip
 
 # Defines
 DEFINES += -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_LONG_LONG -DPRINTF_DISABLE_SUPPORT_PTRDIFF_T
-DEFINES += -DNUM_CORES=$(num_cores) -DBOOT_ADDR=0x$(boot_addr) -DL2_BASE=0x$(l2_base) -DL2_SIZE=0x$(l2_size)
+DEFINES += -DNUM_CORES=$(num_cores) -DBOOT_ADDR=0x$(boot_addr) -DL2_BASE=0x$(l2_base) -DL2_SIZE=0x$(l2_size) -DNBINS=$(nbins) -DNDRAWS=$(ndraws)
 
 # Specify cross compilation target. This can be omitted if LLVM is built with riscv as default target
 RISCV_LLVM_TARGET  ?= --target=$(RISCV_TARGET) --sysroot=$(GCC_INSTALL_DIR)/$(RISCV_TARGET) --gcc-toolchain=$(GCC_INSTALL_DIR)
