@@ -91,9 +91,10 @@ module tcdm_adapter
   logic [31:0] amo_result, amo_result_q;
 
   logic        sc_successful_d, sc_successful_q;
+  logic        sc_sent_d, sc_sent_q;
   logic        sc_q;
   logic        first_lr;
-  logic        send_lr;
+  logic        load_lr;
   
   metadata_t registered_in_meta_o;
     
@@ -108,15 +109,16 @@ module tcdm_adapter
   
   metadata_t            queue_oup_data_o;
 
-  assign send_lr = (rdata_ready && lr_available_q);
-  
   // only load the metadata if it is the first LR
+  // if LRWait, only store metadata in id_queue
   assign meta_valid_in = (amo_op_t'(in_amo_i) == AMOLR) ?
                          first_lr :
                          (in_valid_i && in_ready_o && !in_write_i);
 
-  // if sending lr response, bypass metadata register
-  assign in_meta_o = send_lr  ? queue_oup_data_o : registered_in_meta_o;
+  // if sending lr response, bypass metadata register and send metadata from
+  // queue if sc has been sent
+  assign in_meta_o = (lr_available_q && sc_sent_q)
+                      ? queue_oup_data_o : registered_in_meta_o;
       
   // unique core identifier, does not necessarily match core_id
   logic [CoreIdWidth:0] unique_core_id;  
@@ -145,7 +147,7 @@ module tcdm_adapter
     .clr_i     (1'b0                ),
     .testmode_i(1'b0                ),
     .data_i    (out_rdata           ),
-    .valid_i   (out_gnt || send_lr  ),
+    .valid_i   (out_gnt || load_lr  ),
     .ready_o   (rdata_ready         ),
     .data_o    (in_rdata_o          ),
     .valid_o   (rdata_valid         ),
@@ -158,19 +160,18 @@ module tcdm_adapter
   `FFARN(sc_wdata_q, sc_wdata_d, '0, clk_i, rst_ni);
 
   // In case of a SC we must forward SC result from the cycle earlier.
-  // In case of send_lr send the data of most recent store as LR response
+  // In case of load_lr send the data of most recent store as LR response
   // Send lr occurs 1 cycle after successful SC iff queue for id not empty
-  assign out_rdata = send_lr ?
+  assign out_rdata = load_lr ?
                      sc_wdata_q :
                      (sc_q ?  $unsigned(!sc_successful_q) : out_rdata_i);
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
-  assign in_valid_o = (meta_valid || send_lr) && rdata_valid;
+  assign in_valid_o = (meta_valid || lr_available_q) && rdata_valid;
   
   // Only pop the data from the registers once both registers are ready
   // If  a LR happens and the response is held back, pop the metadata immediately
-  // assign pop_resp   = (amo_op_t'(in_amo_i) == AMOLR) ? !first_lr : in_ready_i && in_valid_o;
   assign pop_resp   = in_ready_i && in_valid_o;
   
   // Generate out_gnt one cycle after sending read request to the bank
@@ -214,13 +215,17 @@ module tcdm_adapter
     `FFARN(lr_available_q, lr_available_d, 1'b0, clk_i, rst_ni);
   
     `FFARN(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
+    `FFARN(sc_sent_q, sc_sent_d, 1'b0, clk_i, rst_ni);
+
     `FFARN(sc_q, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC), 1'b0, clk_i, rst_ni);
 
     always_comb begin
       sc_successful_d = 1'b0;
-
+      sc_sent_d = sc_sent_q;
+      
       queue_inp_req_i = 1'b0;
       first_lr = 1'b0;
+      load_lr = 1'b0;
 
       lr_available_d = lr_available_q;
             
@@ -264,15 +269,17 @@ module tcdm_adapter
              (queue_oup_data_o.core_id == in_meta_i.core_id)) begin
             // entry in queue matches SC
             sc_successful_d = 1'b1;
-            // store value for subsequent reservation
+            sc_sent_d = 1'b0;
+            
+            // store value for sending back with next LR
             sc_wdata_d = in_wdata_i;
             queue_oup_pop_i = 1'b1;
           end
         end // if (amo_op_t'(in_amo_i) == AMOSC)
 
+        // if write to adress from another core occurs
+        // pop reservation at head
         if (in_write_i == 1'b1) begin
-          // if write to adress from another core occurs
-          // pop reservation at head
           queue_oup_req_i = 1;
           if (queue_oup_gnt_o && queue_oup_valid_o) begin
             queue_oup_pop_i = 1'b1;
@@ -280,23 +287,36 @@ module tcdm_adapter
         end
       end // if (in_valid_i && in_ready_o)
 
+
+      // response of sc is consumed
+      if ((sc_successful_q || lr_available_q) && pop_resp) begin
+        sc_sent_d = 1'b1;
+      end
+      
       // send LR after successful SC
       if (sc_successful_q) begin
         // query for the next reservation in the queue
         queue_oup_req_i = 1;
+        // only make lr available when SC response was shifted out
         if (queue_oup_gnt_o && queue_oup_valid_o) begin
-          // queue is not empty and we have a successor
-          lr_available_d = sc_successful_q;
+          // queue is not empty and we have a successor to send LR
+          // result
+          lr_available_d = 1'b1;
         end
       end
+      
       if (lr_available_q) begin
         queue_oup_req_i = 1;
-      end
-
-      // if rdata_register has been consumed
-      // feed lr data
-      if (send_lr) begin
-        lr_available_d = 1'b0;
+        // if rdata_register has been consumed
+        // feed lr data
+        if (rdata_ready) begin
+          load_lr = 1'b1;
+        end
+        
+        if (sc_sent_q && pop_resp) begin
+          lr_available_d = 1'b0;
+          sc_sent_d = 1'b0;
+        end
       end
     end // always_comb
   // end else begin : disable_lrcs
@@ -431,6 +451,11 @@ module tcdm_adapter
     rdata_full : assert property(
       @(posedge clk_i) disable iff (~rst_ni) (out_gnt |-> rdata_ready))
       else $fatal (1, "Trying to push new data although the i_rdata_register is not ready.");
+
+    // If lr_available_d set, the queue has to contain a valid next value
+    lrwait_data_ready : assert property(   
+      @(posedge clk_i) disable iff (~rst_ni) (lr_available_d |-> queue_oup_gnt_o && queue_oup_valid_o))
+      else $fatal (1, "Output for LRWait became invalid.");
   `endif
   // pragma translate_on
 
