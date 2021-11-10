@@ -14,6 +14,7 @@ module tcdm_adapter
   import mempool_pkg::NumCores;
   import mempool_pkg::NumGroups;
   import mempool_pkg::NumCoresPerTile;
+  import mempool_pkg::LrWaitQueueSize;
   import cf_math_pkg::idx_width;
 #(
   parameter int unsigned  AddrWidth    = 32,
@@ -185,7 +186,7 @@ module tcdm_adapter
                     
     id_queue #(
        .ID_WIDTH(AddrWidth),
-       .CAPACITY(1000),
+       .CAPACITY(LrWaitQueueSize),
        .FULL_BW(1),
        .data_t(metadata_t)
      ) i_lrsc_queue (
