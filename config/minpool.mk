@@ -13,3 +13,6 @@ num_cores ?= 16
 
 # Number of cores per MemPool tile
 num_cores_per_tile ?= 4
+
+# length of TCDM LRWait queue
+lrwait_queue_size ?= 16
