@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "alloc.h"
+#include "amo_mutex.h"
 #include "encoding.h"
 #include "lr_sc_mutex.h"
 #include "printf.h"
@@ -23,6 +24,10 @@ void shift_lfsr(uint32_t *lfsr)
 
 uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
 
+#if MUTEX == 1
+amo_mutex_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
+#endif
+
 int main() {
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
@@ -36,6 +41,9 @@ int main() {
     // Initialize series of bins and all of them to zero
     for (int i = 0; i<NBINS; i++){
       hist_bins[i] =0;
+#if MUTEX == 1
+      hist_locks[i] = amo_allocate_mutex();
+#endif
     }
     srand(42);
   }
@@ -46,32 +54,49 @@ int main() {
   uint32_t drawn_number = 0;
   uint32_t init_lfsr = core_id * 42 + 1;
 
+
+  
+
   uint32_t bin_value = 0;
+  uint32_t lr_counter = 0;
   mempool_barrier(num_cores);
-  mempool_start_benchmark();
+  mempool_timer_t start_time = mempool_get_timer();
   
   for (int i = 0; i<NDRAWS; i++){
     // rand_r is threadsafe in comparison to rand()
     // needs seed as pointer
     shift_lfsr(&init_lfsr);
     drawn_number = init_lfsr % NBINS;
-
+#if MUTEX == 1
+    amo_lock_mutex(hist_locks[drawn_number]);
+    hist_bins[drawn_number] += 1;
+    amo_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 2
+    amo_add((hist_bins + drawn_number), 1);
+#else
     do {
       bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+      lr_counter += 1;
     } while(store_conditional((hist_bins+drawn_number), bin_value));
+#endif
   }
-
-  mempool_stop_benchmark();
+  mempool_timer_t stop_time = mempool_get_timer();
+  uint32_t time_diff = stop_time-start_time;
+  write_csr(time, time_diff);
+  write_csr(99, lr_counter);
 
   mempool_barrier(num_cores);
   if(core_id == 0) {
     uint32_t sum = 0;
     for (uint32_t i = 0; i<NBINS; i++){
-      printf("BIN %3d Value %3d \n", i, *(hist_bins+i));
+      // printf("BIN %3d Value %3d \n", i, *(hist_bins+i));
       sum += *(hist_bins+i);
     }
-    printf("NBINS %3d NDRAWS %3d num_cores %3d \n",NBINS,NDRAWS,num_cores);
-    printf("SUM %3d = %3d \n", sum, NDRAWS*num_cores);
+    // printf("NBINS %3d NDRAWS %3d num_cores %3d \n",NBINS,NDRAWS,num_cores);
+    // printf("SUM %3d = %3d \n", sum, NDRAWS*num_cores);
+    if (sum != NDRAWS*num_cores){
+      return -1;
+    }
   }
   // wait until all cores have finished
   mempool_barrier(num_cores);
