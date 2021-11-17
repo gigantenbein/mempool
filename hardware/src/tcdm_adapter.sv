@@ -256,6 +256,12 @@ module tcdm_adapter
             if (!queue_oup_valid_o) begin
               // queue is empty
               first_lr = 1'b1;
+
+            // core issuing LR holds reservation, send out response again
+            end else if ((queue_oup_data_o.ini_addr == in_meta_i.ini_addr) &&
+             (queue_oup_data_o.tile_id == in_meta_i.tile_id) &&
+             (queue_oup_data_o.core_id == in_meta_i.core_id)) begin
+              first_lr = 1'b1;
             end
           end
           
