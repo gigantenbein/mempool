@@ -104,6 +104,9 @@ module tcdm_adapter
   // register data stored by SC to pass to next LR in queue
   logic [DataWidth-1:0] sc_wdata_d, sc_wdata_q;;
 
+  logic [AddrWidth-1:0]                queue_oup_id_i;
+  logic [AddrWidth-1:0]                in_address_q, in_address_d;
+  
   logic                 queue_inp_req_i, queue_inp_gnt_o;
   logic                 queue_oup_req_i, queue_oup_pop_i;
   logic                 queue_oup_gnt_o, queue_oup_valid_o;
@@ -174,6 +177,11 @@ module tcdm_adapter
   // Only pop the data from the registers once both registers are ready
   // If  a LR happens and the response is held back, pop the metadata immediately
   assign pop_resp   = in_ready_i && in_valid_o;
+
+  // If a store conditional succeded, use registered address from store conditional
+  assign queue_oup_id_i = (sc_successful_q || sc_sent_q) ?
+                          in_address_q : in_address_i;
+  
   
   // Generate out_gnt one cycle after sending read request to the bank
   `FFARN(out_gnt, (out_req_o && !out_write_o) || sc_successful_d, 1'b0, clk_i, rst_ni);
@@ -205,7 +213,7 @@ module tcdm_adapter
        .exists_o         (),
        .exists_gnt_o     (),
 
-       .oup_id_i         (in_address_i          ),
+       .oup_id_i         (queue_oup_id_i         ),
        .oup_pop_i        (queue_oup_pop_i       ),
        .oup_req_i        (queue_oup_req_i       ),
        .oup_data_o       (queue_oup_data_o      ),
@@ -219,6 +227,7 @@ module tcdm_adapter
     `FFARN(sc_sent_q, sc_sent_d, 1'b0, clk_i, rst_ni);
 
     `FFARN(sc_q, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC), 1'b0, clk_i, rst_ni);
+    `FFARN(in_address_q, in_address_d, 1'b0, clk_i, rst_ni);
 
     always_comb begin
       sc_successful_d = 1'b0;
@@ -234,7 +243,8 @@ module tcdm_adapter
       queue_oup_pop_i = 1'b0;
 
       sc_wdata_d = sc_wdata_q;
-
+      in_address_d = in_address_q;
+      
       // new valid transaction
       if (in_valid_i && in_ready_o) begin
         if (amo_op_t'(in_amo_i) == AMOLR) begin
@@ -277,7 +287,7 @@ module tcdm_adapter
             // entry in queue matches SC
             sc_successful_d = 1'b1;
             sc_sent_d = 1'b0;
-            
+            in_address_d = in_address_i;
             // store value for sending back with next LR
             sc_wdata_d = in_wdata_i;
             queue_oup_pop_i = 1'b1;
