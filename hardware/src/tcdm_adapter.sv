@@ -468,11 +468,6 @@ module tcdm_adapter
     rdata_full : assert property(
       @(posedge clk_i) disable iff (~rst_ni) (out_gnt |-> rdata_ready))
       else $fatal (1, "Trying to push new data although the i_rdata_register is not ready.");
-
-    // If lr_available_d set, the queue has to contain a valid next value
-    lrwait_data_ready : assert property(   
-      @(posedge clk_i) disable iff (~rst_ni) (lr_available_d |-> queue_oup_gnt_o && queue_oup_valid_o))
-      else $fatal (1, "Output for LRWait became invalid.");
   `endif
   // pragma translate_on
 
