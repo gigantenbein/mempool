@@ -179,7 +179,7 @@ module tcdm_adapter
   assign pop_resp   = in_ready_i && in_valid_o;
 
   // If a store conditional succeded, use registered address from store conditional
-  assign queue_oup_id_i = (sc_successful_q || sc_sent_q) ?
+  assign queue_oup_id_i = (sc_successful_q || lr_available_q) ?
                           in_address_q : in_address_i;
   
   
@@ -319,6 +319,9 @@ module tcdm_adapter
           // queue is not empty and we have a successor to send LR
           // result
           lr_available_d = 1'b1;
+          if (pop_resp) begin
+            sc_sent_d = 1'b1;
+          end
         end
       end
       
