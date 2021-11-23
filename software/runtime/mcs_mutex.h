@@ -85,4 +85,55 @@ int32_t unlock_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
   return 0;
 }
 
+// LRWAIT SOFTWARE
+
+// return a pointer to the initialized lock
+mcs_lock_t* initialize_lrwait_mcs(uint32_t core_id){
+  // Allocate memory
+  mcs_lock_t *const lock = simple_malloc(sizeof(mcs_lock_t));
+  // Check if memory allocations were successful
+  if (lock == NULL) return NULL;
+  // Set initial values
+  lock->next = NULL;
+  lock->locked = core_id;
+
+  return lock;
+}
+
+
+int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
+  // check lock and set yourself as tail
+
+  mcs_lock_t* next = (mcs_lock_t*) amo_swap(&(lock->next), (uint32_t) node);
+  if (next != NULL){
+    // append yourself as next node of previous
+    amo_swap(&(next->next), (uint32_t) node);
+
+    // spin until your node is freed
+    mempool_wfi();
+  }
+
+  return 0;
+}
+
+int32_t lrwait_wakeup_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
+  if (node->next == NULL) {
+    mcs_lock_t* tail_node = load_reserved(&(lock->next));
+
+    // is node the only node in queue
+    if (tail_node == node){
+      store_conditional(&(lock->next), NULL);
+      return 0;
+    } else {
+      store_conditional(&(lock->next), tail_node);
+    }
+    // someone broke the queue, wait here
+    while (node->next == NULL);
+  }
+
+  // wake up your successor
+  wake_up(node->next->locked);
+  return 0;
+}
+
 #endif // MCS_MUTEX_H
