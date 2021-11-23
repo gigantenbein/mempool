@@ -122,11 +122,15 @@ int enqueue(non_blocking_queue_t* const queue, non_blocking_node_t* new_node)
       tail = queue->tail;
       next = (non_blocking_node_t*) load_reserved(&tail->next);
       // Check if next is really the last node
-      if (tail != queue->tail) continue;
+      if (tail != queue->tail){
+        store_conditional(&tail->next, (unsigned) next);
+        continue;
+      }
       if (next == NULL)
         {
           if (!store_conditional(&tail->next, (unsigned) new_node))
             {
+              // node successfully inserted
               break;
             }
           else
@@ -138,6 +142,8 @@ int enqueue(non_blocking_queue_t* const queue, non_blocking_node_t* new_node)
       // Tail did not point to the last node --> update tail pointer
       else
         {
+          store_conditional(&tail->next, (unsigned) next);
+
           tail = (non_blocking_node_t*) load_reserved(&queue->tail);
           next = tail->next;
 
