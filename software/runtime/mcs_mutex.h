@@ -39,11 +39,10 @@ int32_t uninitialize_mcs_lock(mcs_lock_t *const lock){
 
 int32_t lock_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
   // check lock and set yourself as tail
-  // write_csr(88, lock->next);
-  // write_csr(86, node);
+  node->next = NULL;
+  node->locked = 0;
+
   mcs_lock_t* next = (mcs_lock_t*) amo_swap(&(lock->next), (uint32_t) node);
-  write_csr(89, lock->next);
-  // write_csr(87, next);
 
   if (next != NULL){
     // set yourself as locked
@@ -51,12 +50,10 @@ int32_t lock_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
 
     // append yourself as next node of previous
     amo_swap(&(next->next), (uint32_t) node);
-    write_csr(88, lock->next);
-    write_csr(87, next->next);
 
     // spin until your node is freed
     while (amo_swap(&node->locked,1)){
-
+      mempool_wait(1);
     }
   }
 
@@ -64,24 +61,28 @@ int32_t lock_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
 }
 
 int32_t unlock_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
+  mcs_lock_t* old_tail;
+  mcs_lock_t* usurper;
   if (node->next == NULL) {
-    mcs_lock_t* tail_node = load_reserved(&(lock->next));
-    write_csr(78, 1);
-    write_csr(78, tail_node);
-    // is node the only node in queue
-    if (tail_node == node){
-      store_conditional(&(lock->next), NULL);
+    // node has no successor
+    old_tail = amo_swap(&(lock->next), NULL);
+    if (old_tail == node) {
+      // node really had no successor
       return 0;
-    } else {
-      store_conditional(&(lock->next), tail_node);
     }
-    write_csr(78, 2);
-    // someone broke the queue, wait here
-    while (node->next == NULL);
+    usurper = amo_swap(&(lock->next), old_tail);
+    while(node->next == NULL) {
+      mempool_wait(1);
+    }
+    if (usurper != NULL) {
+      // somebody got into the queue ahead of our victims
+      usurper->next = node->next;
+    } else {
+      node->next->locked = 0;
+    }
+  } else {
+    node->next->locked = 0;
   }
-  write_csr(78, 0);
-  // free your successor
-  node->next->locked = 0;
   return 0;
 }
 
@@ -103,6 +104,7 @@ mcs_lock_t* initialize_lrwait_mcs(uint32_t core_id){
 
 int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
   // check lock and set yourself as tail
+  node->next = NULL;
 
   mcs_lock_t* next = (mcs_lock_t*) amo_swap(&(lock->next), (uint32_t) node);
   if (next != NULL){
@@ -117,22 +119,28 @@ int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
 }
 
 int32_t lrwait_wakeup_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
+  mcs_lock_t* old_tail;
+  mcs_lock_t* usurper;
   if (node->next == NULL) {
-    mcs_lock_t* tail_node = load_reserved(&(lock->next));
-
-    // is node the only node in queue
-    if (tail_node == node){
-      store_conditional(&(lock->next), NULL);
+    // node has no successor
+    old_tail = amo_swap(&(lock->next), NULL);
+    if (old_tail == node) {
+      // node really had no successor
       return 0;
-    } else {
-      store_conditional(&(lock->next), tail_node);
     }
-    // someone broke the queue, wait here
-    while (node->next == NULL);
+    usurper = amo_swap(&(lock->next), old_tail);
+    while(node->next == NULL) {
+      mempool_wait(1);
+    }
+    if (usurper != NULL) {
+      // somebody got into the queue ahead of our victims
+      usurper->next = node->next;
+    } else {
+      wake_up(node->next->locked);
+    }
+  } else {
+    wake_up(node->next->locked);
   }
-
-  // wake up your successor
-  wake_up(node->next->locked);
   return 0;
 }
 
