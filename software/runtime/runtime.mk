@@ -62,7 +62,8 @@ RISCV_STRIP   ?= $(RISCV_PREFIX)strip
 # Defines
 DEFINES += -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_LONG_LONG -DPRINTF_DISABLE_SUPPORT_PTRDIFF_T
 DEFINES += -DNUM_CORES=$(num_cores) -DBOOT_ADDR=0x$(boot_addr) -DL2_BASE=0x$(l2_base) -DL2_SIZE=0x$(l2_size)
-DEFINES += -DNBINS=$(nbins) -DNDRAWS=$(ndraws) -DMUTEX=$(mutex)
+DEFINES += -DNBINS=$(nbins) -DMUTEX=$(mutex) -DMATRIXCORES=$(matrixcores)
+DEFINES += -DOTHER_CORE_IDLE=$(other_core_idle)
 
 # Specify cross compilation target. This can be omitted if LLVM is built with riscv as default target
 RISCV_LLVM_TARGET  ?= --target=$(RISCV_TARGET) --sysroot=$(GCC_INSTALL_DIR)/$(RISCV_TARGET) --gcc-toolchain=$(GCC_INSTALL_DIR)
@@ -86,7 +87,7 @@ else
 endif
 
 LINKER_SCRIPT ?= $(ROOT_DIR)/arch.ld
-RUNTIME ?= $(ROOT_DIR)/crt0.S.o $(ROOT_DIR)/printf.c.o $(ROOT_DIR)/string.c.o $(ROOT_DIR)/synchronization.c.o $(ROOT_DIR)/serial.c.o $(ROOT_DIR)/alloc.c.o $(ROOT_DIR)/amo_mutex.c.o $(ROOT_DIR)/blocking_queue.c.o
+RUNTIME ?= $(ROOT_DIR)/crt0.S.o $(ROOT_DIR)/printf.c.o $(ROOT_DIR)/string.c.o $(ROOT_DIR)/synchronization.c.o $(ROOT_DIR)/serial.c.o $(ROOT_DIR)/alloc.c.o $(ROOT_DIR)/amo_mutex.c.o
 
 # For unit tests
 RISCV_CCFLAGS_TESTS ?= $(RISCV_FLAGS_GCC) $(RISCV_FLAGS_COMMON_TESTS) -fvisibility=hidden -nostdlib $(RISCV_LDFLAGS)
