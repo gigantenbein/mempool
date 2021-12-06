@@ -69,7 +69,7 @@ module tcdm_adapter
 
   logic meta_valid, meta_ready;
   logic meta_valid_in;
-  
+
   logic rdata_valid, rdata_ready;
 
   /// read signal before register
@@ -96,9 +96,9 @@ module tcdm_adapter
   logic        sc_q;
   logic        first_lr;
   logic        load_lr;
-  
+
   metadata_t registered_in_meta_o;
-    
+
   logic        lr_available_d, lr_available_q;
 
   // register data stored by SC to pass to next LR in queue
@@ -106,11 +106,11 @@ module tcdm_adapter
 
   logic [AddrWidth-1:0]                queue_oup_id_i;
   logic [AddrWidth-1:0]                in_address_q, in_address_d;
-  
+
   logic                 queue_inp_req_i, queue_inp_gnt_o;
   logic                 queue_oup_req_i, queue_oup_pop_i;
   logic                 queue_oup_gnt_o, queue_oup_valid_o;
-  
+
   metadata_t            queue_oup_data_o;
 
   // only load the metadata if it is the first LR
@@ -123,9 +123,9 @@ module tcdm_adapter
   // queue if sc has been sent
   assign in_meta_o = (lr_available_q && sc_sent_q)
                       ? queue_oup_data_o : registered_in_meta_o;
-      
+
   // unique core identifier, does not necessarily match core_id
-  logic [CoreIdWidth:0] unique_core_id;  
+  logic [CoreIdWidth:0] unique_core_id;
 
   // Store the metadata at handshake
   spill_register #(
@@ -157,7 +157,7 @@ module tcdm_adapter
     .valid_o   (rdata_valid         ),
     .ready_i   (pop_resp            )
   );
-   
+
 
   // if SC successful, store value to return in next cycle
 
@@ -173,7 +173,7 @@ module tcdm_adapter
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
   assign in_valid_o = (meta_valid || lr_available_q) && rdata_valid;
-  
+
   // Only pop the data from the registers once both registers are ready
   // If  a LR happens and the response is held back, pop the metadata immediately
   assign pop_resp   = in_ready_i && in_valid_o;
@@ -181,8 +181,8 @@ module tcdm_adapter
   // If a store conditional succeded, use registered address from store conditional
   assign queue_oup_id_i = (sc_successful_q || lr_available_q) ?
                           in_address_q : in_address_i;
-  
-  
+
+
   // Generate out_gnt one cycle after sending read request to the bank
   `FFARN(out_gnt, (out_req_o && !out_write_o) || sc_successful_d, 1'b0, clk_i, rst_ni);
 
@@ -191,7 +191,6 @@ module tcdm_adapter
   // ----------------
 
   // if (LrScEnable) begin : gen_lrsc
-                    
     id_queue #(
        .ID_WIDTH(AddrWidth),
        .CAPACITY(LrWaitQueueSize),
@@ -206,7 +205,7 @@ module tcdm_adapter
        .inp_req_i        (queue_inp_req_i      ),
        .inp_gnt_o        (queue_inp_gnt_o    ),
 
-       // tie to 0 to disable exists 
+       // tie to 0 to disable exists
        .exists_data_i    ('0),
        .exists_mask_i    ('0),
        .exists_req_i     (1'b0),
@@ -222,7 +221,7 @@ module tcdm_adapter
      );
 
     `FFARN(lr_available_q, lr_available_d, 1'b0, clk_i, rst_ni);
-  
+
     `FFARN(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
     `FFARN(sc_sent_q, sc_sent_d, 1'b0, clk_i, rst_ni);
 
@@ -232,19 +231,19 @@ module tcdm_adapter
     always_comb begin
       sc_successful_d = 1'b0;
       sc_sent_d = sc_sent_q;
-      
+
       queue_inp_req_i = 1'b0;
       first_lr = 1'b0;
       load_lr = 1'b0;
 
       lr_available_d = lr_available_q;
-            
+
       queue_oup_req_i = 1'b0;
       queue_oup_pop_i = 1'b0;
 
       sc_wdata_d = sc_wdata_q;
       in_address_d = in_address_q;
-      
+
       // new valid transaction
       if (in_valid_i && in_ready_o) begin
         if (amo_op_t'(in_amo_i) == AMOLR) begin
@@ -259,7 +258,7 @@ module tcdm_adapter
           if (!queue_inp_gnt_o) begin
             first_lr = 1'b1;
           end
-          
+
           // check if queue is empty for id
           queue_oup_req_i = 1;
           if (queue_oup_gnt_o) begin
@@ -272,9 +271,11 @@ module tcdm_adapter
              (queue_oup_data_o.tile_id == in_meta_i.tile_id) &&
              (queue_oup_data_o.core_id == in_meta_i.core_id)) begin
               first_lr = 1'b1;
+              // hold flag low to not fill queue with reservations
+              queue_inp_req_i = 1'b0;
             end
           end
-          
+
         end else if (amo_op_t'(in_amo_i) == AMOSC) begin
           queue_oup_req_i = 1;
           // check if ID matches by reading head
@@ -309,7 +310,7 @@ module tcdm_adapter
       if ((sc_successful_q || lr_available_q) && pop_resp) begin
         sc_sent_d = 1'b1;
       end
-      
+
       // send LR after successful SC
       if (sc_successful_q) begin
         // query for the next reservation in the queue
@@ -324,7 +325,7 @@ module tcdm_adapter
           end
         end
       end
-      
+
       if (lr_available_q) begin
         queue_oup_req_i = 1;
         // if rdata_register has been consumed
@@ -332,7 +333,7 @@ module tcdm_adapter
         if (rdata_ready) begin
           load_lr = 1'b1;
         end
-        
+
         if (sc_sent_q && pop_resp) begin
           lr_available_d = 1'b0;
           sc_sent_d = 1'b0;
@@ -354,7 +355,7 @@ module tcdm_adapter
     // block new req when feeding out LR
     in_ready_o = lr_available_d ? 1'b0 : (in_valid_o && !in_ready_i ? 1'b0 : 1'b1);
 
-    // if LR, only load value when either first LR or SC happened    
+    // if LR, only load value when either first LR or SC happened
     out_req_o   = (amo_op_t'(in_amo_i) == AMOLR) ?
                   (first_lr && in_valid_i && in_ready_o) : (in_valid_i && in_ready_o);
     out_add_o   = in_address_i;
