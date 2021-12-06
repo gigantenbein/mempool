@@ -23,6 +23,8 @@ void shift_lfsr(uint32_t *lfsr)
   *lfsr ^= *lfsr >> 13;
 }
 
+uint32_t NUMBER_OF_CYCLES = 1000;
+
 uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
 
 #if MUTEX == 1
@@ -68,7 +70,7 @@ int main() {
 #elif MUTEX == 3
     for (int i = 0; i < NUM_CORES; i++){
       // pass core_id to lock to indicate which node
-      // has to be waken up
+      // has to be woken up
       mcs_nodes[i] = initialize_lrwait_mcs(i);
     }
 #endif
@@ -83,7 +85,10 @@ int main() {
   mempool_barrier(num_cores);
   mempool_timer_t start_time = mempool_get_timer();
 
-  for (int i = 0; i<NDRAWS; i++){
+  uint32_t hist_iterations = 0;
+  mempool_timer_t countdown = 0;
+
+  while(countdown < NUMBER_OF_CYCLES) {
     // needs seed as pointer
     shift_lfsr(&init_lfsr);
     drawn_number = init_lfsr % NBINS;
@@ -105,26 +110,27 @@ int main() {
       lr_counter += 1;
     } while(store_conditional((hist_bins+drawn_number), bin_value));
 #endif
+    hist_iterations++;
+    countdown = mempool_get_timer() - start_time;
   }
+
+  write_csr(time, hist_iterations++);
   
-  mempool_timer_t stop_time = mempool_get_timer();
-  uint32_t time_diff = stop_time-start_time;
-  write_csr(time, time_diff);
 #if MUTEX==0
   write_csr(99, lr_counter);
 #endif
 
   mempool_barrier(num_cores);
-  if(core_id == 0) {
-    uint32_t sum = 0;
-    for (uint32_t i = 0; i<NBINS; i++){
-      sum += *(hist_bins+i);
-    }
-    if (sum != NDRAWS*num_cores){
-      return -1;
-    }
-  }
+  
+  // if(core_id == 0) {
+  //   uint32_t sum = 0;
+  //   for (uint32_t i = 0; i<NBINS; i++){
+  //     sum += *(hist_bins+i);
+  //   }
+  //   if (sum != NDRAWS*num_cores){
+  //     return -1;
+  //   }
+  // }
   // wait until all cores have finished
-  mempool_barrier(num_cores);
   return 0;
 }
