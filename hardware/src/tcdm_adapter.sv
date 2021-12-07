@@ -67,7 +67,9 @@ module tcdm_adapter #(
   logic meta_valid, meta_ready;
   logic rdata_valid, rdata_ready;
 
-  /// read signal before register
+  // meta signal before register
+  metadata_t in_meta;
+  // read signal before register
   logic [DataWidth-1:0] out_rdata;
 
   logic out_gnt;
@@ -86,6 +88,18 @@ module tcdm_adapter #(
   logic [31:0] amo_operand_b_q;
   logic [31:0] amo_result, amo_result_q;
 
+  // signals for DistLRWait
+  // LR that arrives is a wake_up_req
+  logic        wake_up_req;
+  // LR that should be sent is a successor update
+  logic        successor_update_d, successor_update_q;
+  // indicates if request was a SC
+  logic        sc_active;
+  logic        sc_successful_d, sc_successful_q;
+
+  logic [DataWidth-1:0] wake_up_data_d, wake_up_data_q;
+  metadata_t            lrwait_meta;
+
   // Store the metadata at handshake
   spill_register #(
     .T     (metadata_t),
@@ -95,7 +109,7 @@ module tcdm_adapter #(
     .rst_ni (rst_ni                                 ),
     .valid_i(in_valid_i && in_ready_o && !in_write_i),
     .ready_o(meta_ready                             ),
-    .data_i (in_meta_i                              ),
+    .data_i (in_meta                                ),
     .valid_o(meta_valid                             ),
     .ready_i(pop_resp                               ),
     .data_o (in_meta_o                              )
@@ -117,14 +131,10 @@ module tcdm_adapter #(
     .ready_i   (pop_resp   )
   );
 
-  localparam int unsigned CoreIdWidth  = idx_width(NumCores);
-  localparam int unsigned IniAddrWidth = idx_width(NumCoresPerTile + NumGroups);
-
-  logic sc_successful_d, sc_successful_q;
-  logic sc_q;
+  assign in_meta = (wake_up_req || successor_update_d) ? lrwait_meta : in_meta_i;
 
   // In case of a SC we must forward SC result from the cycle earlier.
-  assign out_rdata = (sc_q && LrScEnable) ? $unsigned(!sc_successful_q) : out_rdata_i;
+  assign out_rdata = sc_active ? !sc_successful_q : (successor_update_q ? wake_up_data_q : out_rdata_i);
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
@@ -132,91 +142,114 @@ module tcdm_adapter #(
   // Only pop the data from the registers once both registers are ready
   assign pop_resp   = in_ready_i && in_valid_o;
 
+  `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
   // Generate out_gnt one cycle after sending read request to the bank
-  `FF(out_gnt, (out_req_o && !out_write_o) || sc_successful_d, 1'b0, clk_i, rst_ni);
+  `FF(out_gnt, (out_req_o && !out_write_o) || sc_active || successor_update_d, 1'b0, clk_i, rst_ni);
 
   // ----------------
   // LR/SC
   // ----------------
 
   if (LrScEnable) begin : gen_lrsc
-    // unique core identifier, does not necessarily match core_id
-    logic [CoreIdWidth:0] unique_core_id;
 
+    // the reservation structure builds up a MCS queue in hardware with the
+    // tail node in front of the TCDM bank. The nodes pointing to a successor
+    // are located in front of the core issuing a LR
+    // An additional head node is needed, to prevent SCs without a reservation
+    // from succeeding
     typedef struct packed {
-      /// Is the reservation valid.
-      logic                 valid;
-      /// On which address is the reservation placed.
-      /// This address is aligned to the memory size
-      /// implying that the reservation happen on a set size
-      /// equal to the word width of the memory (32 or 64 bit).
+      // needed to prevent rogue SCs from succeeding
+      logic                 head_valid;
+      logic                 tail_valid;
+      // addr of reservation
       logic [AddrWidth-1:0] addr;
-      /// Which core made this reservation. Important to
-      /// track the reservations from different cores and
-      /// to prevent any live-locking.
-      logic [CoreIdWidth:0] core;
-    } reservation_t;
-    reservation_t reservation_d, reservation_q;
+      // head of queue who can issue successful SCs
+      metadata_t            head;
+      metadata_t            tail;
+    } queue_reservation_t;
 
-    `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
+    queue_reservation_t reservation_d, reservation_q;
+
     `FF(reservation_q, reservation_d, 1'b0, clk_i, rst_ni);
-    `FF(sc_q, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC), 1'b0, clk_i, rst_ni);
+    `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
 
     always_comb begin
-      // {group_id, tile_id, core_id}
-      // MSB of ini_addr determines if request is coming from local or remote tile
-      if (in_meta_i.ini_addr[IniAddrWidth-1] == 0) begin
-        // Request is coming from the local tile
-        // take group id of TCDM adapter
-        unique_core_id = {'0, in_meta_i.tile_id, in_meta_i.ini_addr[IniAddrWidth-2:0]};
-      end else begin
-        // Request is coming from a remote tile
-        // take group id from ini_addr
-        // Ignore first bit of IniAddr to obtain the group address
-        unique_core_id = {in_meta_i.ini_addr[IniAddrWidth-2:0],
-                          in_meta_i.tile_id, in_meta_i.core_id};
-      end
-
       reservation_d = reservation_q;
+
+      lrwait_meta = '0;
+      wake_up_req = 1'b0;
+      wake_up_data_d = wake_up_data_q;
+
+      successor_update_d = 1'b0;
+
       sc_successful_d = 1'b0;
-      // new valid transaction
+      sc_active = 1'b0;
+
       if (in_valid_i && in_ready_o) begin
+        // a request arrives
+        if ((amo_op_t'(in_amo_i) == AMOLR)) begin
+          // a LR was issued
+          if(in_meta_i.lrwait == 1'b1) begin
+            // the LR is a wake-up request from a Qnode
+            wake_up_req = 1'b1;
+            // extract metadata
+            // cast from data to lrwait
+            lrwait_meta = in_wdata_i;
+            // set incoming metadata as head
+            reservation_d.head_valid = 1'b1;
+            reservation_d.head = lrwait_meta;
+          end else begin
+            // it is a normal LR
+            if(in_meta_i == reservation_q.head && in_address_i == reservation_q.addr) begin
+              // core issued a reservation again
+              // make sure the reservation is still valid
+              reservation_d.head_valid = 1'b1;
+            end else if (reservation_q.tail_valid == 1'b1 && in_address_i == reservation_q.addr) begin
+              // there is somebody in the queue
 
-        // An SC can only pair with the most recent LR in program order.
-        // Place a reservation on the address if there isn't already a valid reservation.
-        // We prevent a live-lock by don't throwing away the reservation of a hart unless
-        // it makes a new reservation in program order or issues any SC.
-        if (amo_op_t'(in_amo_i) == AMOLR &&
-            (!reservation_q.valid || reservation_q.core == unique_core_id)) begin
-          reservation_d.valid = 1'b1;
-          reservation_d.addr = in_address_i;
-          reservation_d.core = unique_core_id;
-        end
+              // prepare successor update
+              // load data into read register
+              wake_up_data_d = in_meta_i;
 
-        // An SC may succeed only if no store from another hart (or other device) to
-        // the reservation set can be observed to have occurred between
-        // the LR and the SC, and if there is no other SC between the
-        // LR and itself in program order.
+              // get metadata from tail
+              lrwait_meta = reservation_q.tail;
+              // set as successor update
+              lrwait_meta.lrwait = 1'b1;
 
-        // check whether another core has made a write attempt
-        if ((unique_core_id != reservation_q.core) &&
-            (in_address_i == reservation_q.addr) &&
-            (!(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC}) || in_write_i)) begin
-          reservation_d.valid = 1'b0;
-        end
+              // set as tail node
+              reservation_d.tail = in_meta_i;
 
-        // An SC from the same hart clears any pending reservation.
-        if (reservation_q.valid && amo_op_t'(in_amo_i) == AMOSC
-            && reservation_q.core == unique_core_id) begin
-          reservation_d.valid = 1'b0;
-          sc_successful_d = (reservation_q.addr == in_address_i);
+              // prevent request on SRAM
+              successor_update_d = 1'b1;
+            end else begin
+              // the queue has been empty
+              // set yourself as head and tail node
+              reservation_d.tail = in_meta_i;
+              reservation_d.tail_valid = 1'b1;
+              reservation_d.head = in_meta_i;
+              reservation_d.head_valid = 1'b1;
+              reservation_d.addr = in_address_i;
+            end
+          end
+        end else if ((amo_op_t'(in_amo_i) == AMOSC)) begin // if ((amo_op_t'(in_amo_i) == AMOLR))
+          // indicate that an SC is active
+          sc_active = 1'b1;
+          if (in_meta_i == reservation_q.head &&
+              reservation_q.head_valid == 1'b1 &&
+              in_address_i == reservation_q.addr ) begin
+            sc_successful_d = 1'b1;
+            // invalidate reservation
+            reservation_d.head_valid = 1'b0;
+          end else begin
+            sc_successful_d = 1'b0;
+          end
+        end else if (in_write_i && (in_address_i == reservation_q.addr)) begin
+          // a write occurred to a reserved location
+          reservation_d.head_valid = 1'b0;
         end
       end
     end // always_comb
   end else begin : disable_lrcs
-    assign sc_q = 1'b0;
-    assign sc_successful_d = 1'b0;
-    assign sc_successful_q = 1'b0;
   end
 
   // ----------------
@@ -226,7 +259,7 @@ module tcdm_adapter #(
   always_comb begin
     // feed-through
     in_ready_o  = in_valid_o && !in_ready_i ? 1'b0 : 1'b1;
-    out_req_o   = in_valid_i && in_ready_o;
+    out_req_o   = (sc_active ? sc_successful_q : (in_valid_i && in_ready_o)) && !successor_update_d;
     out_add_o   = in_address_i;
     out_write_o = in_write_i || (sc_successful_d && (amo_op_t'(in_amo_i) == AMOSC));
     out_wdata_o = in_wdata_i;
@@ -237,7 +270,8 @@ module tcdm_adapter #(
 
     unique case (state_q)
       Idle: begin
-        if (in_valid_i && in_ready_o && !(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC})) begin
+        if(in_valid_i && in_ready_o &&
+           !(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC})) begin
           load_amo = 1'b1;
           state_d = DoAMO;
         end
