@@ -21,11 +21,11 @@ module tcdm_adapter_tb;
   localparam TT          = 0.8ns;
 
   // set number of cores sending requests
-  localparam int NumActiveCores = 256;
+  localparam int NumActiveCores = 1;
   // set number of rounds where each core can send a request if he is active
   localparam int NumIterations = 10;
   // randomize address and payloads for TCDM
-  localparam logic FULL_RANDOM_TEST = 1;
+  localparam logic FULL_RANDOM_TEST = 0;
   // print requests sent and received
   localparam logic VERBOSE = 0;
   // if valid, delay raising of ready flag at output of TCDM adapter
@@ -67,6 +67,7 @@ module tcdm_adapter_tb;
     meta_id_t meta_id;
     tile_group_id_t tile_id;
     tile_core_id_t core_id;
+    logic        lrwait;
   } bank_metadata_t;
 
   // match signals to mempool_tile
