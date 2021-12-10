@@ -143,6 +143,7 @@ module tcdm_adapter #(
   assign pop_resp   = in_ready_i && in_valid_o;
 
   `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
+  `FF(wake_up_data_q, wake_up_data_d, 1'b0, clk_i, rst_ni);
   // Generate out_gnt one cycle after sending read request to the bank
   `FF(out_gnt, (out_req_o && !out_write_o) || sc_active || successor_update_d, 1'b0, clk_i, rst_ni);
 
