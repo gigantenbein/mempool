@@ -132,8 +132,27 @@ package mempool_pkg;
   typedef logic [idx_width(NumGroups)-1:0] group_id_t;
   typedef logic [3:0] amo_t;
 
+
+  typedef struct packed {
+    addr_t addr;
+    meta_id_t id;
+    logic lrwait;
+    logic [3:0] amo;
+    logic write;
+    data_t data;
+    strb_t strb;
+  } snitch_dreq_t;
+
+  typedef struct packed {
+    data_t data;
+    meta_id_t id;
+    logic lrwait;
+    logic error;
+  } snitch_dresp_t;
+
   typedef struct packed {
     meta_id_t meta_id;
+    logic lrwait;
     tile_core_id_t core_id;
     amo_t amo;
     data_t data;
