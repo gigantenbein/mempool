@@ -145,7 +145,7 @@ module tcdm_adapter #(
   `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
   `FF(wake_up_data_q, wake_up_data_d, 1'b0, clk_i, rst_ni);
   // Generate out_gnt one cycle after sending read request to the bank
-  `FF(out_gnt, (out_req_o && !out_write_o) || sc_active || successor_update_d, 1'b0, clk_i, rst_ni);
+  `FF(out_gnt, (out_req_o && !out_write_o) || sc_successful_d || successor_update_d, 1'b0, clk_i, rst_ni);
 
   // ----------------
   // LR/SC
@@ -173,6 +173,7 @@ module tcdm_adapter #(
 
     `FF(reservation_q, reservation_d, 1'b0, clk_i, rst_ni);
     `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
+    `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC), 1'b0, clk_i, rst_ni);
 
     always_comb begin
       reservation_d = reservation_q;
@@ -184,7 +185,6 @@ module tcdm_adapter #(
       successor_update_d = 1'b0;
 
       sc_successful_d = 1'b0;
-      sc_active = 1'b0;
 
       if (in_valid_i && in_ready_o) begin
         // a request arrives
@@ -234,7 +234,6 @@ module tcdm_adapter #(
           end
         end else if ((amo_op_t'(in_amo_i) == AMOSC)) begin // if ((amo_op_t'(in_amo_i) == AMOLR))
           // indicate that an SC is active
-          sc_active = 1'b1;
           if (in_meta_i == reservation_q.head &&
               reservation_q.head_valid == 1'b1 &&
               in_address_i == reservation_q.addr ) begin
@@ -260,7 +259,7 @@ module tcdm_adapter #(
   always_comb begin
     // feed-through
     in_ready_o  = in_valid_o && !in_ready_i ? 1'b0 : 1'b1;
-    out_req_o   = (sc_active ? sc_successful_q : (in_valid_i && in_ready_o)) && !successor_update_d;
+    out_req_o   = in_valid_i && in_ready_o;
     out_add_o   = in_address_i;
     out_write_o = in_write_i || (sc_successful_d && (amo_op_t'(in_amo_i) == AMOSC));
     out_wdata_o = in_wdata_i;
