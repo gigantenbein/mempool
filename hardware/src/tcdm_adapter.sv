@@ -15,6 +15,7 @@ module tcdm_adapter #(
   parameter int unsigned  DataWidth    = 32,
   parameter type          metadata_t   = logic,
   parameter bit           LrScEnable   = 1,
+  parameter bit           LrWaitEnable = 1,
   // Cut path between request and response at the cost of increased AMO latency
   parameter bit           RegisterAmo  = 1'b0,
   // Dependent parameters. DO NOT CHANGE.
@@ -47,7 +48,16 @@ module tcdm_adapter #(
   import mempool_pkg::NumCores;
   import mempool_pkg::NumGroups;
   import mempool_pkg::NumCoresPerTile;
+  import mempool_pkg::NumTilesPerGroup;
   import cf_math_pkg::idx_width;
+  import snitch_pkg::MetaIdWidth;
+
+  // ini_addr_width + meta_id_width + core_id_width + tile_id_width
+  localparam int MetaWidth = idx_width(NumCoresPerTile + NumGroups) +
+                             MetaIdWidth +
+                             idx_width(NumCoresPerTile) +
+                             idx_width(NumTilesPerGroup) +
+                             LrWaitEnable;
 
   typedef enum logic [3:0] {
       AMONone = 4'h0,
@@ -64,12 +74,11 @@ module tcdm_adapter #(
       AMOSC   = 4'hB
   } amo_op_t;
 
-  logic meta_valid, meta_ready;
+  logic meta_valid,  meta_ready;
   logic rdata_valid, rdata_ready;
 
-  // meta signal before register
-  metadata_t in_meta;
-  // read signal before register
+  // meta and rdata before registering
+  metadata_t            in_meta;
   logic [DataWidth-1:0] out_rdata;
 
   logic out_gnt;
@@ -81,7 +90,6 @@ module tcdm_adapter #(
 
   logic                 load_amo;
   amo_op_t              amo_op_q;
-  logic [BeWidth-1:0]   be_expand;
   logic [AddrWidth-1:0] addr_q;
 
   logic [31:0] amo_operand_a;
@@ -91,13 +99,16 @@ module tcdm_adapter #(
   // signals for DistLRWait
   // LR that arrives is a wake_up_req
   logic        wake_up_req;
+
   // LR that should be sent is a successor update
   logic        successor_update_d, successor_update_q;
-  // indicates if request was a SC
+
+  // indicate if request was a SC
   logic        sc_active;
   logic        sc_successful_d, sc_successful_q;
 
-  logic [DataWidth-1:0] wake_up_data_d, wake_up_data_q;
+  // storage of metadata to send to next core
+  logic [MetaWidth-1:0] wake_up_data_d, wake_up_data_q;
   metadata_t            lrwait_meta;
 
   // Store the metadata at handshake
@@ -134,7 +145,9 @@ module tcdm_adapter #(
   assign in_meta = (wake_up_req || successor_update_d) ? lrwait_meta : in_meta_i;
 
   // In case of a SC we must forward SC result from the cycle earlier.
-  assign out_rdata = sc_active ? !sc_successful_q : (successor_update_q ? wake_up_data_q : out_rdata_i);
+  // wake_up_data_q is implicitly zero-padded form MetaWidth to DataWidth
+  assign out_rdata = sc_active ? !sc_successful_q :
+                     (successor_update_q ? wake_up_data_q : out_rdata_i);
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
@@ -145,13 +158,14 @@ module tcdm_adapter #(
   `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
   `FF(wake_up_data_q, wake_up_data_d, 1'b0, clk_i, rst_ni);
   // Generate out_gnt one cycle after sending read request to the bank
-  `FF(out_gnt, (out_req_o && !out_write_o) || sc_successful_d || successor_update_d, 1'b0, clk_i, rst_ni);
+  `FF(out_gnt, (out_req_o && !out_write_o) || sc_successful_d || successor_update_d
+      , 1'b0, clk_i, rst_ni);
 
   // ----------------
   // LR/SC
   // ----------------
 
-  if (LrScEnable) begin : gen_lrsc
+  if (LrWaitEnable) begin : gen_lrsc
 
     // the reservation structure builds up a MCS queue in hardware with the
     // tail node in front of the TCDM bank. The nodes pointing to a successor
@@ -161,6 +175,7 @@ module tcdm_adapter #(
     typedef struct packed {
       // needed to prevent rogue SCs from succeeding
       logic                 head_valid;
+      // indicate if tail points to a real core
       logic                 tail_valid;
       // addr of reservation
       logic [AddrWidth-1:0] addr;
@@ -173,7 +188,8 @@ module tcdm_adapter #(
 
     `FF(reservation_q, reservation_d, 1'b0, clk_i, rst_ni);
     `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
-    `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC), 1'b0, clk_i, rst_ni);
+    `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC),
+        1'b0, clk_i, rst_ni);
 
     always_comb begin
       reservation_d = reservation_q;
@@ -201,7 +217,9 @@ module tcdm_adapter #(
             reservation_d.head = lrwait_meta;
           end else begin
             // it is a normal LR
-            if(in_meta_i == reservation_q.head && in_address_i == reservation_q.addr) begin
+            if(in_meta_i == reservation_q.head
+               && reservation_q.head_valid == 1'b1
+               && in_address_i == reservation_q.addr) begin
               // core issued a reservation again
               // make sure the reservation is still valid
               reservation_d.head_valid = 1'b1;
@@ -240,15 +258,23 @@ module tcdm_adapter #(
             sc_successful_d = 1'b1;
             // invalidate reservation
             reservation_d.head_valid = 1'b0;
+            if (reservation_q.head == reservation_q.tail) begin
+              // if head and tail match, it was the only node in the queue
+              reservation_d.tail_valid = 1'b0;
+            end
           end else begin
             sc_successful_d = 1'b0;
           end
         end else if (in_write_i && (in_address_i == reservation_q.addr)) begin
           // a write occurred to a reserved location
           reservation_d.head_valid = 1'b0;
+          if (reservation_q.head == reservation_q.tail) begin
+            // if head and tail match, it was the only node in the queue
+            reservation_d.tail_valid = 1'b0;
+          end
         end
-      end
-    end // always_comb
+      end // if (in_valid_i && in_ready_o)
+    end
   end else begin : disable_lrcs
   end
 

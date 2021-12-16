@@ -183,67 +183,70 @@ module mempool_cc
     .data_o  ( data_resp_q       )
   );
 
-  lrwait_qnode #(
-    .metadata_t   (meta_id_t),
-    .LrWaitEnable (1'b1     )
-  ) i_lrwait_qnode (
-    .clk_i              (clk_i              ),
-    .rst_ni             (!rst_i             ),
+  import mempool_pkg::LrWaitEnable;
+  if (LrWaitEnable) begin: gen_qnode
+    lrwait_qnode #(
+      .metadata_t   (meta_id_t)
+    ) i_lrwait_qnode (
+      .clk_i              (clk_i              ),
+      .rst_ni             (!rst_i             ),
 
-    // TCDM Ports
-    // Snitch side
-    // requests
-    .snitch_qaddr_i     (data_req_q.addr    ),
-    .snitch_qwrite_i    (data_req_q.write   ),
-    .snitch_qamo_i      (data_req_q.amo     ),
-    .snitch_qdata_i     (data_req_q.data    ),
-    .snitch_qstrb_i     (data_req_q.strb    ),
-    .snitch_qid_i       (data_req_q.id      ),
-    .snitch_qvalid_i    (data_req_q_valid   ),
-    .snitch_qready_o    (data_req_q_ready   ),
+      // TCDM Ports
+      // Snitch side
+      // requests
+      .snitch_qaddr_i     (data_req_q.addr    ),
+      .snitch_qwrite_i    (data_req_q.write   ),
+      .snitch_qamo_i      (data_req_q.amo     ),
+      .snitch_qdata_i     (data_req_q.data    ),
+      .snitch_qstrb_i     (data_req_q.strb    ),
+      .snitch_qid_i       (data_req_q.id      ),
+      .snitch_qvalid_i    (data_req_q_valid   ),
+      .snitch_qready_o    (data_req_q_ready   ),
 
-    // responses
-    .snitch_pdata_o     (data_resp_d.data   ),
-    .snitch_perror_o    (data_resp_d.error  ),
-    .snitch_pid_o       (data_resp_d.id     ),
-    .snitch_pvalid_o    (data_resp_d_valid  ),
-    .snitch_pready_i    (data_resp_d_ready  ),
+      // responses
+      .snitch_pdata_o     (data_resp_d.data   ),
+      .snitch_perror_o    (data_resp_d.error  ),
+      .snitch_pid_o       (data_resp_d.id     ),
+      .snitch_pvalid_o    (data_resp_d_valid  ),
+      .snitch_pready_i    (data_resp_d_ready  ),
 
-    // Interconnect side
-    // TCDM ports
-    // requests
-    .tile_qaddr_o       (data_qaddr_o       ),
-    .tile_qwrite_o      (data_qwrite_o      ),
-    .tile_qamo_o        (data_qamo_o        ),
-    .tile_qdata_o       (data_qdata_o       ),
-    .tile_qstrb_o       (data_qstrb_o       ),
-    .tile_qid_o         (data_qid_o         ),
-    .tile_qlrwait_o     (data_qlrwait_o     ),
-    .tile_qvalid_o      (data_qvalid_o      ),
-    .tile_qready_i      (data_qready_i      ),
+      // Interconnect side
+      // TCDM ports
+      // requests
+      .tile_qaddr_o       (data_qaddr_o       ),
+      .tile_qwrite_o      (data_qwrite_o      ),
+      .tile_qamo_o        (data_qamo_o        ),
+      .tile_qdata_o       (data_qdata_o       ),
+      .tile_qstrb_o       (data_qstrb_o       ),
+      .tile_qid_o         (data_qid_o         ),
+      .tile_qlrwait_o     (data_qlrwait_o     ),
+      .tile_qvalid_o      (data_qvalid_o      ),
+      .tile_qready_i      (data_qready_i      ),
 
-    // responses
-    .tile_pdata_i       (data_pdata_i       ),
-    .tile_perror_i      (data_perror_i      ),
-    .tile_pid_i         (data_pid_i         ),
-    .tile_plrwait_i     (data_plrwait_i     ),
-    .tile_pvalid_i      (data_pvalid_i      ),
-    .tile_pready_o      (data_pready_o      )
-  );
-  // Assign TCDM data interface
-  // assign data_qaddr_o      = data_req_q.addr;
-  // assign data_qwrite_o     = data_req_q.write;
-  // assign data_qamo_o       = data_req_q.amo;
-  // assign data_qdata_o      = data_req_q.data;
-  // assign data_qstrb_o      = data_req_q.strb;
-  // assign data_qid_o        = data_req_q.id;
-  // assign data_qvalid_o     = data_req_q_valid;
-  // assign data_req_q_ready  = data_qready_i;
-  // assign data_resp_d.data  = data_pdata_i;
-  // assign data_resp_d.id    = data_pid_i;
-  // assign data_resp_d.error = data_perror_i;
-  // assign data_resp_d_valid = data_pvalid_i;
-  // assign data_pready_o     = data_resp_d_ready;
+      // responses
+      .tile_pdata_i       (data_pdata_i       ),
+      .tile_perror_i      (data_perror_i      ),
+      .tile_pid_i         (data_pid_i         ),
+      .tile_plrwait_i     (data_plrwait_i     ),
+      .tile_pvalid_i      (data_pvalid_i      ),
+      .tile_pready_o      (data_pready_o      )
+    );
+  end else begin // block: gen_qnode
+    // Assign TCDM data interface
+    assign data_qaddr_o      = data_req_q.addr;
+    assign data_qwrite_o     = data_req_q.write;
+    assign data_qamo_o       = data_req_q.amo;
+    assign data_qdata_o      = data_req_q.data;
+    assign data_qstrb_o      = data_req_q.strb;
+    assign data_qid_o        = data_req_q.id;
+    assign data_qvalid_o     = data_req_q_valid;
+    assign data_req_q_ready  = data_qready_i;
+    assign data_resp_d.data  = data_pdata_i;
+    assign data_resp_d.id    = data_pid_i;
+    assign data_resp_d.error = data_perror_i;
+    assign data_resp_d_valid = data_pvalid_i;
+    assign data_pready_o     = data_resp_d_ready;
+  end
 
   // --------------------------
   // Tracer
