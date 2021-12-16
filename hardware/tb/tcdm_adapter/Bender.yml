@@ -13,6 +13,7 @@ dependencies:
 sources:
   # Level 0
   - ../../src/mempool_pkg.sv
+  - ../../src/lrwait_qnode.sv
   - ../../src/tcdm_adapter.sv
 
   - target: tcdm_vsim
