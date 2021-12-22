@@ -12,6 +12,20 @@
 // is finished, the Qnode releases a WakeUp which passes the lock to his
 // successor.
 //
+// Nomenclature:
+// LRReq         : Load reserved req going from Snitch to TCDM
+// LRResp        : Load reserved resp going from TCDM to Snitch
+// SCReq         : Store conditional req going from Snitch to TCDM
+// SCResp        : Store conditional resp coming from TCDM to Snitch
+// SuccUpdate    : Successor update sent by TCDM when a Load reserved at the
+//                 the TCDM arrives and the Tail node is already occupied. The
+//                 tail node is then replaced with the requester and a
+//                 SuccUpdate is sent to the core that was in the Tail node
+//                 previously
+//                 The LRWait bit in the metadata is asserted.
+// WakeUpReq     : Req going to TCDM with payload containing the metadata which
+//                 core to wake up next
+//                 The LRWait bit in the metadata is asserted.
 //
 // Author: Marc Gantenbein
 
@@ -74,7 +88,7 @@ module lrwait_qnode
 
   import cf_math_pkg::idx_width;
 
-  // ini_addr_width + meta_id_width + core_id_width + tile_id_width
+  // ini_addr_width + meta_id_width + core_id_width + tile_id_width + lrwait
   localparam int MetaWidth = idx_width(NumCoresPerTile + NumGroups) +
                              MetaIdWidth +
                              idx_width(NumCoresPerTile) +
@@ -96,16 +110,13 @@ module lrwait_qnode
   } amo_op_t;
 
   enum logic [1:0] {
-      Idle, WaitForSC, InQueue, SendWakeUp
+      Idle, ReadyForSC, InLRQueue, SendWakeUp
   } state_q, state_d;
-
-  // assign pass through signals
-  assign tile_qstrb_o  = snitch_qstrb_i;
-  assign tile_qwrite_o = snitch_qwrite_i;
-  assign snitch_perror_o = tile_perror_i;
 
   // define next node pointer
   typedef struct packed {
+    // indicates if a reservation can be active
+    logic        valid;
     // pointer to successor by having metadata for successor
     // this metadata is sent to the tcdm and then used to send a wakeup
     // to the next core using the metadata stored here
@@ -120,40 +131,46 @@ module lrwait_qnode
   } next_node_t;
 
   next_node_t             next_node_d, next_node_q;
-  // signal to check if a SC corresponding to a LR already passed
-  logic                   sc_req_arrived_d, sc_req_arrived_q;
-  // allow signals to directly pass
-  logic                   pass_through_request, pass_through_response;
-
-  `FF(sc_req_arrived_q, sc_req_arrived_d, 1'b0, clk_i, rst_ni);
   `FF(next_node_q, next_node_d, 1'b0, clk_i, rst_ni);
 
+
+  // assign pass through signals
+  assign tile_qstrb_o    = snitch_qstrb_i;
+  assign tile_qwrite_o   = snitch_qwrite_i;
+  assign snitch_perror_o = tile_perror_i;
+
+  // signal to check if a SC corresponding to a LR already passed
+  logic sc_req_arrived_d, sc_req_arrived_q;
+  `FF(sc_req_arrived_q, sc_req_arrived_d, 1'b0, clk_i, rst_ni);
+
+  // allow signals to directly pass
+  logic pass_through_request, pass_through_response;
+
+  // pass responses through if they are not SuccUpdates
+  assign pass_through_response = !tile_plrwait_i;
+
+  assign tile_pready_o   = pass_through_response ? snitch_pready_i : tile_pvalid_i;
+  assign snitch_pvalid_o = pass_through_response ? tile_pvalid_i   : 1'b0;
+  assign snitch_pdata_o  = pass_through_response ? tile_pdata_i    : 1'b0;
+  assign snitch_pid_o    = pass_through_response ? tile_pid_i      : 1'b0;
+
+  // always allow handshakes except when inserting WakeUp
+  assign pass_through_request = (state_q == SendWakeUp) ? 1'b0 : 1'b1;
+  assign snitch_qready_o = pass_through_request ? tile_qready_i   : 1'b0;
+
   always_comb begin
-    state_d = state_q;
-    next_node_d = next_node_q;
+    state_d          = state_q;
+    next_node_d      = next_node_q;
 
     sc_req_arrived_d = sc_req_arrived_q;
 
-    // pass responses through if they are not SuccUpdates
-    pass_through_response = !tile_plrwait_i;
+    tile_qvalid_o    = pass_through_request ? snitch_qvalid_i : 1'b0;
+    tile_qdata_o     = snitch_qdata_i;
+    tile_qamo_o      = snitch_qamo_i;
+    tile_qaddr_o     = snitch_qaddr_i;
+    tile_qid_o       = snitch_qid_i;
 
-    tile_pready_o   = pass_through_response ? snitch_pready_i : tile_pvalid_i;
-    snitch_pvalid_o = pass_through_response ? tile_pvalid_i   : 1'b0;
-    snitch_pdata_o  = pass_through_response ? tile_pdata_i    : 1'b0;
-    snitch_pid_o    = pass_through_response ? tile_pid_i      : 1'b0;
-
-    // always allow handshakes except when inserting WakeUp
-    pass_through_request = (state_q == SendWakeUp) ? 1'b0 : 1'b1;
-
-    tile_qvalid_o   = pass_through_request ? snitch_qvalid_i : 1'b0;
-    snitch_qready_o = pass_through_request ? tile_qready_i   : 1'b0;
-
-    tile_qdata_o    = snitch_qdata_i;
-    tile_qamo_o     = snitch_qamo_i;
-    tile_qaddr_o    = snitch_qaddr_i;
-    tile_qid_o      = snitch_qid_i;
-
-    tile_qlrwait_o = 1'b0;
+    tile_qlrwait_o   = 1'b0;
 
     // FSM
     unique case (state_q)
@@ -162,90 +179,115 @@ module lrwait_qnode
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
           if (amo_op_t'(snitch_qamo_i) == AMOLR) begin
-            // register addr of LR
-            next_node_d.addr = snitch_qaddr_i;
             next_node_d.instruction_id = snitch_qid_i;
+            next_node_d.addr           = snitch_qaddr_i;
+            next_node_d.valid          = 1'b1;
+          end
+          if (amo_op_t'(snitch_qamo_i) == AMOSC) begin
+            // a SC without reservations passes
+            $fatal("Always place a reservation for an SC");
           end
         end
         // a response arrives
         if (tile_pvalid_i) begin
-          // check if it is a LRresp
-          if (next_node_q.instruction_id == tile_qid_o) begin
-            state_d = WaitForSC;
-          end
-          if(tile_plrwait_i == 1'b1) begin
-            // it is a successor update
+          if (snitch_pready_i) begin
+            // It has to be either a LRResp or a SCResp
+            if((tile_pid_i == next_node_q.instruction_id) &&
+               (next_node_q.valid == 1'b1)) begin
+              state_d = ReadyForSC;
+            end
+          end else if (tile_plrwait_i == 1'b1) begin
+            // we are waiting for a response and now have received a SuccUpdate
             next_node_d.metadata = tile_pdata_i[MetaWidth-1:0];
-            state_d = InQueue;
+            state_d = InLRQueue;
           end
         end
       end // case: Idle
 
-      // If we received our LRresp, we are ready to wait for a SC
-      // When we receive a SC request
-      WaitForSC: begin
-
+      ReadyForSC: begin
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
           if (amo_op_t'(snitch_qamo_i) == AMOLR) begin
-            // register addr of LR
-            if(next_node_d.addr == snitch_qaddr_i) begin
-              // a core issued a nested reservation
-              // to same address it is fine
+            // a core issued another reservation
+            $fatal("Core issued another LR while LR was still active");
+          end else if ((amo_op_t'(snitch_qamo_i) == AMOSC)) begin
+            if ((next_node_q.addr == snitch_qaddr_i) &&
+                (next_node_q.valid == 1'b1)) begin
+              // SC matches address of reservation
+              next_node_d.instruction_id = snitch_qid_i;
+              next_node_d.addr           = snitch_qaddr_i;
+              sc_req_arrived_d           = 1'b1;
             end else begin
-              // TODO: THROW an error
+              $fatal("Yes, always place a reservation for an SC");
             end
-          end else if ((amo_op_t'(snitch_qamo_i) == AMOSC) &&
-                       (snitch_qaddr_i == next_node_q.addr)) begin
-            next_node_d.instruction_id = snitch_qid_i;
-            sc_req_arrived_d = 1'b1;
           end
         end
 
+        // a resp arrives
         if (tile_pvalid_i) begin
-          // a resp arrives
-          if(tile_plrwait_i == 1'b1) begin
-            // SuccUpdate arrived
+          if (tile_plrwait_i == 1'b1) begin
+            // the response is a SuccUpdate
             next_node_d.metadata = tile_pdata_i[MetaWidth-1:0];
             if (sc_req_arrived_d == 1'b1) begin
+              // we check the current sc_req_arrived since a response
+              // and a request can arrive at the same time
               state_d = SendWakeUp;
+            end else begin
+              state_d = InLRQueue;
             end
-            state_d = InQueue;
-          end else if (next_node_q.instruction_id == tile_pid_i) begin
-            state_d = Idle;
+          end else if(tile_pid_i == next_node_q.instruction_id) begin
+            // it is a SCResp, we can go back to Idle since we are sure
+            // that no SC update will arrive now until the next LR/SC
+            // cycle
+            if(snitch_pready_i == 1'b1) begin
+              // only go back to idle when handshake happened
+              sc_req_arrived_d  = 1'b0;
+              next_node_d.valid = 1'b0;
+
+              state_d = Idle;
+            end
           end
         end
       end // case: WaitForSC
 
-      InQueue: begin
+      InLRQueue: begin
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
-          if ((amo_op_t'(snitch_qamo_i) == AMOSC) &&
-              (snitch_qaddr_i == next_node_q.addr)) begin
-            // send the wake up
-            next_node_d.addr = snitch_qaddr_i;
-            state_d = SendWakeUp;
+          if ((amo_op_t'(snitch_qamo_i) == AMOSC)) begin
+            if ((next_node_q.addr == snitch_qaddr_i) &&
+                (next_node_q.valid == 1'b1)) begin
+              // SC matches address of reservation
+              next_node_d.instruction_id = snitch_qid_i;
+              next_node_d.addr           = snitch_qaddr_i;
+              sc_req_arrived_d           = 1'b1;
+              state_d                    = SendWakeUp;
+            end else begin
+              $fatal("no reservation for SC");
+            end
+          end else if (sc_req_arrived_d == 1'b1) begin // if ((amo_op_t'(snitch_qamo_i) == AMOSC))
+            $fatal("Only send one SC per reservation");
           end
-        end
-      end // case: InQueue
+        end // if (snitch_qvalid_i && tile_qready_i)
+      end
 
       SendWakeUp: begin
-        sc_req_arrived_d = 1'b0;
+        sc_req_arrived_d  = 1'b0;
+        next_node_d.valid = 1'b0;
 
         // send wake up
-        tile_qamo_o = AMOLR;
-        tile_qaddr_o = next_node_q.addr;
+        tile_qamo_o    = AMOLR;
+        tile_qaddr_o   = next_node_q.addr;
 
         // set metadata and set lrwait flag
-        tile_qid_o = snitch_qid_i;
+        tile_qid_o     = snitch_qid_i;
         tile_qlrwait_o = 1'b1;
 
         // store metadata of successor in payload
         // TODO: replace with datawidth
-        tile_qdata_o = 32'b0;
+        tile_qdata_o                = 32'b0;
         tile_qdata_o[MetaWidth-1:0] = next_node_q.metadata;
 
-        tile_qvalid_o = 1'b1;
+        tile_qvalid_o  = 1'b1;
         // wait for handshake
         if (tile_qready_i == 1'b1) begin
           // handshake happened
@@ -267,13 +309,17 @@ module lrwait_qnode
     end
   end
 
-  // // pragma translate_off
+  // pragma translate_off
 
-  // `ifndef VERILATOR
-  //   rdata_full : assert property(
-  //     @(posedge clk_i) disable iff (~rst_ni) ())
-  //     else $fatal (1, "Trying to push new data although the i_rdata_register is not ready.");
-  // `endif
-  // // pragma translate_on
+`ifndef VERILATOR
+  illegal_transition : assert property(
+                                       @(posedge clk_i) disable iff (~rst_ni) ((state_q == InLRQueue)|=> not (state_q == Idle)))
+    else $fatal (1, "Trying to do an illegal transition going from InLRQueue to Idle");
+  leave_send_wakeup : assert property(
+                                      @(posedge clk_i) disable iff (~rst_ni) ((state_q == SendWakeUp)|=> (state_q == SendWakeUp)
+                                                                              or (state_q == Idle)))
+    else $fatal (1, "SendWakeUp did not succeed");
+`endif
+  // pragma translate_on
 
 endmodule
