@@ -89,6 +89,6 @@ simc_tcdm: compile_tcdm
 # Clean targets
 .PHONY: clean
 clean:
-	rm Bender.lock
+	rm -f Bender.lock
 	rm -rf .bender
 	rm -rf $(buildpath)
