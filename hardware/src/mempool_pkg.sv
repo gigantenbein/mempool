@@ -37,6 +37,7 @@ package mempool_pkg;
   localparam integer unsigned BankingFactor    = 4;
   localparam bit              LrScEnable       = 1'b1;
   localparam bit              LrWaitEnable     = 1'b1;
+  localparam integer unsigned NumLrWaitAddr    = 4;
   localparam integer unsigned TCDMSizePerBank  = 1024; // [B]
   localparam integer unsigned NumBanks         = NumCores * BankingFactor;
   localparam integer unsigned NumBanksPerTile  = NumBanks / NumTiles;
