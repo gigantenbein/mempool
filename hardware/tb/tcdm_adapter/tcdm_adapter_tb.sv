@@ -246,11 +246,13 @@ module tcdm_adapter_tb;
 
   for (genvar t = 0; unsigned'(t) < NumTcdmBanks; t++) begin : gen_tcdms
     tcdm_adapter #(
-        .AddrWidth   (TCDMAddrMemWidth),
-        .DataWidth   (DataWidth       ),
-        .metadata_t  (bank_metadata_t ),
-        .LrScEnable  (LrScEnable      ),
-        .RegisterAmo (1'b0            )
+        .AddrWidth     (TCDMAddrMemWidth),
+        .DataWidth     (DataWidth       ),
+        .metadata_t    (bank_metadata_t ),
+        .LrScEnable    (LrScEnable      ),
+        .LrWaitEnable  (LrWaitEnable    ),
+        .NumLrWaitAddr (NumLrWaitAddr   ),
+        .RegisterAmo   (1'b0            )
     ) i_tcdm_adapter (
         .clk_i       (clk                                    ),
         .rst_ni      (rst_n                                  ),
@@ -464,15 +466,17 @@ class Generator;
   constraint c_generator {
     if (FULL_RANDOM_TEST) {
       // pick a random address from possible addresses
-      rand_addr inside {42, 300, 700};
-
+      rand_addr > 0;
+      rand_addr < NumTcdmBanks * TCDMSizePerBank;
       // generate random data
       rand_data > 0;
       rand_data < 32000;
     }
     else {
-      rand_addr == 512;
-      rand_data == 32'hCAFECAFE;
+      rand_addr inside {1, 64, 127, 42, 12, 15};
+      // generate random data
+      rand_data > 0;
+      rand_data < 32000;
     }
   }
 
@@ -696,7 +700,8 @@ class GoldenTCDM;
   // check size of queue before inserting a new reservation
   bank_addr_t         check_size;
   int                 current_queue_size;
-
+  int                 number_of_active_queues;
+  int                 queue_is_full;
 
   // Golden Model for write access to TCDM
   // Pop the reservation if one was available
@@ -753,19 +758,44 @@ class GoldenTCDM;
 
     // check queue size by adding sizes of all queues in associative array
     // to not exceed total queue size
+
+    // if reservation_queues is not empty, check the size of each entry
     if (reservation_queues.first(check_size)) begin
       current_queue_size = 0;
+      number_of_active_queues = 0;
 
       do begin
+        if (reservation_queues[check_size].size() >= 1) begin
+          // there is a reservation queue for the current address
+          number_of_active_queues += 1;
+        end
+
         current_queue_size += reservation_queues[check_size].size();
-      end while (reservation_queues.next(check_size));
+      end while (reservation_queues.next(check_size) >= 1);
       if (VERBOSE) begin
         $display("Current size of reservation queue %d ", current_queue_size);
+        $display("Number of active queues %d ", number_of_active_queues);
+      end
+      if ((current_queue_size < LrWaitQueueSize) &&
+          (number_of_active_queues < NumLrWaitAddr)) begin
+        // there is an empty queue node available
+        queue_is_full = 0;
+      end else if (reservation_queues.exists(addr)) begin
+        // all queue nodes are occupied, but an occupied node contains the same
+        // address
+        if (reservation_queues[addr].size() == 0) begin
+          queue_is_full = 1;
+        end else begin
+          queue_is_full = 0;
+        end
+      end else begin
+        // all nodes are occupied and no queue node matches the current address
+        queue_is_full = 1;
       end
     end
 
     // Check if queue is full, else ignore reservation and send out response directly
-    if (current_queue_size < LrWaitQueueSize) begin
+    if(!queue_is_full) begin
       // place reservation in queue
       if (reservation_queues.exists(addr)) begin
         // has a reservation already been placed in the queue?
@@ -813,6 +843,9 @@ class GoldenTCDM;
       end // else: !if(reservation_queues.exists(addr))
     end else begin
       // queue is full, we sent the LR response directly
+      if (VERBOSE) begin
+        $display("Queue is full, no reservation placed.");
+      end
       respdriver[req_core_id].expected_data_resp.push_back(resp_data);
       respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
     end
@@ -832,29 +865,45 @@ class GoldenTCDM;
     // check if reservation is valid
     // take head of LR queue
     if (reservation_queues.exists(addr)) begin
-      if (match_metadata_for_core_id(.meta1(reservation_queues[addr][0]),
-                                                .meta2(metadata))) begin
-        // metadata matches, issue SC
-        mock_memory[addr] = data;
-        respdriver[req_core_id].expected_data_resp.push_back(1'b0);
-        respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+      if (VERBOSE) begin
+        $display("store conditional reservation %h ", reservation_queues[addr][0]);
+      end
+      if (reservation_queues[addr].size() != 0) begin
+        if (match_metadata_for_core_id(.meta1(reservation_queues[addr][0]),
+                                       .meta2(metadata))) begin
+          // metadata matches, issue SC
+          mock_memory[addr] = data;
+          respdriver[req_core_id].expected_data_resp.push_back(1'b0);
+          respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
 
-        // pop reservation
-        void'(reservation_queues[addr].pop_front());
-        if (reservation_queues[addr].size() != 0) begin
+          // pop reservation
+          void'(reservation_queues[addr].pop_front());
+          if (reservation_queues[addr].size() != 0) begin
 
-          resp_metadata = reservation_queues[addr][0];
-          resp_core_id = get_core_id_as_int(.meta(resp_metadata));
-          if (VERBOSE) begin
-            $display("Send out load reserved to core %d", resp_core_id);
+            resp_metadata = reservation_queues[addr][0];
+            resp_core_id = get_core_id_as_int(.meta(resp_metadata));
+            if (VERBOSE) begin
+              $display("Send out load reserved to core %d", resp_core_id);
+            end
+            respdriver[resp_core_id].expected_data_resp.push_back(mock_memory[addr]);
+            respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
           end
-          respdriver[resp_core_id].expected_data_resp.push_back(mock_memory[addr]);
-          respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
+        end else begin
+          // sc failed
+          if (VERBOSE) begin
+            $display("store conditional failed");
+          end
+          respdriver[req_core_id].expected_data_resp.push_back(1'b1);
+          respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
         end
       end else begin
         // SC failed
         if (VERBOSE) begin
-          $display("metadata %b reservation in queue %b", metadata, reservation_queues[addr][0]);
+          if (reservation_queues[addr].size() != 0) begin
+            $display("metadata %b reservation in queue %b", metadata, reservation_queues[addr][0]);
+          end else begin
+            $display("metadata %b no reservation was placed", metadata);
+          end
           $display("store conditional failed");
         end
         respdriver[req_core_id].expected_data_resp.push_back(1'b1);
@@ -862,6 +911,9 @@ class GoldenTCDM;
       end
     end else begin
       // sc failed
+      if (VERBOSE) begin
+        $display("store conditional failed");
+      end
       respdriver[req_core_id].expected_data_resp.push_back(1'b1);
       respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
     end
@@ -876,7 +928,7 @@ endclass : GoldenTCDM;
 class Scoreboard;
   // Description:
 
-  function int compare_responses();
+  function void compare_responses();
     automatic int total_success_count = 0;
     automatic int total_resp_count = 0;
     $display("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
@@ -907,7 +959,7 @@ class Scoreboard;
           end
         end else begin
           if (VERBOSE) begin
-            $display("FAIL");
+            $display("%-30s %s != %s","FAIL","Expected","Actual");
             $display( "%-30s %h != %h","Data", respdriver[c].expected_data_resp[i],
                       respdriver[c].actual_data_resp[i]);
             $display( "%-30s %b != %b","Metadata", respdriver[c].expected_metadata_resp[i],

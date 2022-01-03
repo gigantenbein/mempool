@@ -14,13 +14,13 @@ package tcdm_tb_pkg;
                                     unsigned'($clog2(NumActiveCores)) : 1;
   localparam int   SelCoreWidth   = CoreIdWidth;
   // number of TCDM banks per tile
-  localparam int   NumTcdmBanks   = 4;
+  localparam int   NumTcdmBanks   = 16;
   localparam int   SelTcdmWidth   = (NumTcdmBanks > 2 ) ?
                                     unsigned'($clog2(NumTcdmBanks)) : 1;
 
 
   // set number of rounds to send requests
-  localparam int   NumIterations    = 2;
+  localparam int   NumIterations    = 100;
 
   // randomize address and payloads for TCDM
   localparam logic FULL_RANDOM_TEST = 1;
