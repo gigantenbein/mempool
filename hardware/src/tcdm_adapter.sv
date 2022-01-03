@@ -11,15 +11,16 @@
 `include "common_cells/registers.svh"
 
 module tcdm_adapter #(
-  parameter int unsigned  AddrWidth    = 32,
-  parameter int unsigned  DataWidth    = 32,
-  parameter type          metadata_t   = logic,
-  parameter bit           LrScEnable   = 1,
-  parameter bit           LrWaitEnable = 1,
+  parameter int unsigned  AddrWidth     = 32,
+  parameter int unsigned  DataWidth     = 32,
+  parameter type          metadata_t    = logic,
+  parameter bit           LrScEnable    = 1,
+  parameter bit           LrWaitEnable  = 1,
+  parameter int unsigned  NumLrWaitAddr = 4,
   // Cut path between request and response at the cost of increased AMO latency
-  parameter bit           RegisterAmo  = 1'b0,
+  parameter bit           RegisterAmo   = 1'b0,
   // Dependent parameters. DO NOT CHANGE.
-  localparam int unsigned BeWidth      = DataWidth/8
+  localparam int unsigned BeWidth       = DataWidth/8
 ) (
   input  logic                 clk_i,
   input  logic                 rst_ni,
@@ -162,10 +163,10 @@ module tcdm_adapter #(
       , 1'b0, clk_i, rst_ni);
 
   // ----------------
-  // LR/SC
+  // LRWait
   // ----------------
 
-  if (LrWaitEnable) begin : gen_lrsc
+  if (LrWaitEnable) begin : gen_lrwait
 
     // the reservation structure builds up a MCS queue in hardware with the
     // tail node in front of the TCDM bank. The nodes pointing to a successor
@@ -174,9 +175,9 @@ module tcdm_adapter #(
     // from succeeding
     typedef struct packed {
       // needed to prevent rogue SCs from succeeding
-      logic                 head_valid;
+      logic        head_valid;
       // indicate if tail points to a real core
-      logic                 tail_valid;
+      logic        tail_valid;
       // addr of reservation
       logic [AddrWidth-1:0] addr;
       // head of queue who can issue successful SCs
@@ -184,12 +185,64 @@ module tcdm_adapter #(
       metadata_t            tail;
     } queue_reservation_t;
 
-    queue_reservation_t reservation_d, reservation_q;
+    queue_reservation_t [NumLrWaitAddr-1:0] reservation_d, reservation_q;
 
     `FF(reservation_q, reservation_d, 1'b0, clk_i, rst_ni);
     `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
     `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC),
         1'b0, clk_i, rst_ni);
+
+
+    // check for free reservation node
+    localparam int unsigned NodeIdxWidth = $clog2(NumLrWaitAddr);
+
+    logic [NodeIdxWidth-1:0] current_idx;
+    logic                    all_nodes_full;
+    logic                    addr_match;
+
+    if (NumLrWaitAddr > 1) begin : gen_multip_lrwait_nodes
+      logic [NumLrWaitAddr-1:0] idx_matches_addr;
+      logic [NumLrWaitAddr-1:0] node_is_free;
+      for (genvar a = 0; a < NumLrWaitAddr; a++) begin
+        assign idx_matches_addr[a] = in_valid_i && (reservation_q[a].addr == in_address_i)
+          && (reservation_q[a].tail_valid);
+        assign node_is_free[a] = !reservation_q[a].tail_valid;
+      end
+
+      logic [NodeIdxWidth-1:0]    node_idx;
+      logic [NodeIdxWidth-1:0]    node_is_free_idx;
+
+      onehot_to_bin #(
+        .ONEHOT_WIDTH ( NumLrWaitAddr )
+      ) i_id_ohb_in (
+        .onehot ( idx_matches_addr ),
+        .bin    ( node_idx         )
+      );
+
+      // if no node is free, the LRWait queue is full
+      assign all_nodes_full = ~|(node_is_free);
+
+      // addr match means we can pick an existing node
+      assign addr_match = |idx_matches_addr;
+
+      // find free index for address
+      // Find the first free index
+      lzc #(
+        .WIDTH ( NumLrWaitAddr ),
+        .MODE  ( 0             ) // Start at index 0.
+      ) i_ld_free_lzc (
+        .in_i    ( node_is_free     ),
+        .cnt_o   ( node_is_free_idx ),
+        .empty_o ( /*unused*/       )
+      );
+
+      assign current_idx = addr_match ? node_idx : node_is_free_idx;
+    end else begin : single_lrwait_node // block: gen_multip_lrwait_nodes
+
+      assign current_idx    = 1'b0;
+      assign all_nodes_full = 1'b0;
+      assign addr_match     = 1'b1;
+    end
 
     always_comb begin
       reservation_d = reservation_q;
@@ -213,17 +266,21 @@ module tcdm_adapter #(
             // cast from data to lrwait
             lrwait_meta = in_wdata_i;
             // set incoming metadata as head
-            reservation_d.head_valid = 1'b1;
-            reservation_d.head = lrwait_meta;
-          end else begin
+            reservation_d[current_idx].head_valid = 1'b1;
+            reservation_d[current_idx].head = lrwait_meta;
+
+            // if an LR, check if we have space for LR
+          end else if (!(all_nodes_full) || addr_match) begin // if (in_meta_i.lrwait == 1'b1)
             // it is a normal LR
-            if(in_meta_i == reservation_q.head
-               && reservation_q.head_valid == 1'b1
-               && in_address_i == reservation_q.addr) begin
+
+            if((in_meta_i == reservation_q[current_idx].head)
+               && (reservation_q[current_idx].head_valid == 1'b1)
+               && (in_address_i == reservation_q[current_idx].addr)) begin
               // core issued a reservation again
               // make sure the reservation is still valid
-              reservation_d.head_valid = 1'b1;
-            end else if (reservation_q.tail_valid == 1'b1 && in_address_i == reservation_q.addr) begin
+              reservation_d[current_idx].head_valid = 1'b1;
+            end else if ((reservation_q[current_idx].tail_valid == 1'b1)
+                         && (in_address_i == reservation_q[current_idx].addr)) begin
               // there is somebody in the queue
 
               // prepare successor update
@@ -231,52 +288,52 @@ module tcdm_adapter #(
               wake_up_data_d = in_meta_i;
 
               // get metadata from tail
-              lrwait_meta = reservation_q.tail;
+              lrwait_meta = reservation_q[current_idx].tail;
               // set as successor update
               lrwait_meta.lrwait = 1'b1;
 
               // set as tail node
-              reservation_d.tail = in_meta_i;
+              reservation_d[current_idx].tail = in_meta_i;
 
               // prevent request on SRAM
               successor_update_d = 1'b1;
             end else begin
               // the queue has been empty
               // set yourself as head and tail node
-              reservation_d.tail = in_meta_i;
-              reservation_d.tail_valid = 1'b1;
-              reservation_d.head = in_meta_i;
-              reservation_d.head_valid = 1'b1;
-              reservation_d.addr = in_address_i;
+              reservation_d[current_idx].tail       = in_meta_i;
+              reservation_d[current_idx].tail_valid = 1'b1;
+              reservation_d[current_idx].head       = in_meta_i;
+              reservation_d[current_idx].head_valid = 1'b1;
+              reservation_d[current_idx].addr       = in_address_i;
             end
           end
         end else if ((amo_op_t'(in_amo_i) == AMOSC)) begin // if ((amo_op_t'(in_amo_i) == AMOLR))
           // indicate that an SC is active
-          if (in_meta_i == reservation_q.head &&
-              reservation_q.head_valid == 1'b1 &&
-              in_address_i == reservation_q.addr ) begin
+          if (in_meta_i == reservation_q[current_idx].head &&
+              reservation_q[current_idx].head_valid == 1'b1 &&
+              in_address_i == reservation_q[current_idx].addr ) begin
             sc_successful_d = 1'b1;
             // invalidate reservation
-            reservation_d.head_valid = 1'b0;
-            if (reservation_q.head == reservation_q.tail) begin
+            reservation_d[current_idx].head_valid = 1'b0;
+            if (reservation_q[current_idx].head == reservation_q[current_idx].tail) begin
               // if head and tail match, it was the only node in the queue
-              reservation_d.tail_valid = 1'b0;
+              reservation_d[current_idx].tail_valid = 1'b0;
             end
           end else begin
             sc_successful_d = 1'b0;
           end
-        end else if (in_write_i && (in_address_i == reservation_q.addr)) begin
+        end else if (in_write_i && (in_address_i == reservation_q[current_idx].addr)) begin
           // a write occurred to a reserved location
-          reservation_d.head_valid = 1'b0;
-          if (reservation_q.head == reservation_q.tail) begin
+          reservation_d[current_idx].head_valid = 1'b0;
+          if (reservation_q[current_idx].head == reservation_q[current_idx].tail) begin
             // if head and tail match, it was the only node in the queue
-            reservation_d.tail_valid = 1'b0;
+            reservation_d[current_idx].tail_valid = 1'b0;
           end
         end
       end // if (in_valid_i && in_ready_o)
-    end
-  end else begin : disable_lrcs
-  end
+    end // always_comb
+end else begin: gen_disable_lr_sc // block: gen_lrwait
+end
 
   // ----------------
   // Atomics
