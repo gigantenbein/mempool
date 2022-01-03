@@ -158,6 +158,7 @@ module tcdm_adapter #(
 
   `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
   `FF(wake_up_data_q, wake_up_data_d, 1'b0, clk_i, rst_ni);
+
   // Generate out_gnt one cycle after sending read request to the bank
   `FF(out_gnt, (out_req_o && !out_write_o) || sc_successful_d || successor_update_d
       , 1'b0, clk_i, rst_ni);
@@ -192,7 +193,6 @@ module tcdm_adapter #(
     `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC),
         1'b0, clk_i, rst_ni);
 
-
     // check for free reservation node
     localparam int unsigned NodeIdxWidth = $clog2(NumLrWaitAddr);
 
@@ -204,8 +204,9 @@ module tcdm_adapter #(
       logic [NumLrWaitAddr-1:0] idx_matches_addr;
       logic [NumLrWaitAddr-1:0] node_is_free;
       for (genvar a = 0; a < NumLrWaitAddr; a++) begin
-        assign idx_matches_addr[a] = in_valid_i && (reservation_q[a].addr == in_address_i)
-          && (reservation_q[a].tail_valid);
+        assign idx_matches_addr[a] = in_valid_i
+                                     && (reservation_q[a].addr == in_address_i)
+                                       && (reservation_q[a].tail_valid);
         assign node_is_free[a] = !reservation_q[a].tail_valid;
       end
 
@@ -265,14 +266,17 @@ module tcdm_adapter #(
             // extract metadata
             // cast from data to lrwait
             lrwait_meta = in_wdata_i;
+
+            // tie lrwait to 0 since it is not needed
+            lrwait_meta.lrwait = 1'b0;
+
             // set incoming metadata as head
             reservation_d[current_idx].head_valid = 1'b1;
             reservation_d[current_idx].head = lrwait_meta;
 
-            // if an LR, check if we have space for LR
-          end else if (!(all_nodes_full) || addr_match) begin // if (in_meta_i.lrwait == 1'b1)
+            // if an LR, check if we have space for new reservation
+          end else if (!(all_nodes_full) || addr_match) begin
             // it is a normal LR
-
             if((in_meta_i == reservation_q[current_idx].head)
                && (reservation_q[current_idx].head_valid == 1'b1)
                && (in_address_i == reservation_q[current_idx].addr)) begin
@@ -282,7 +286,6 @@ module tcdm_adapter #(
             end else if ((reservation_q[current_idx].tail_valid == 1'b1)
                          && (in_address_i == reservation_q[current_idx].addr)) begin
               // there is somebody in the queue
-
               // prepare successor update
               // load data into read register
               wake_up_data_d = in_meta_i;
