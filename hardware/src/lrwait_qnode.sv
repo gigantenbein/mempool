@@ -2,15 +2,21 @@
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
 
-// Description: The Qnode implements a distributed MCS lock together
-// with the TCDM adapter. An MCS lock is a queue based lock where,
-// each hart stores a pointer to a hart that tried to acquire the
-// lock after him.
+// Description: The Qnode implements a queue in fashion of a linked
+// list for ordering Load-Reserved(LR) to the TCDM adapter. Instead
+// of queueing up all LRs directly in front of the TCDM, the queue
+// is distributed to each core sending the reservation and to the
+// tcdm_adapter itself. When the core is part of LR queue the Qnode
+// contains a "pointer" in the form of metadata to its successor.
+//
 // The Qnode is the storage of this "pointer" to the next hart. So
 // when a hart queues up in the TCDM adapter, the Qnode of his
-// predecessor is updated with his metadata. Then when the predecessor
-// is finished, the Qnode releases a WakeUp which passes the lock to his
-// successor.
+// predecessor is updated with the metadata of the successor. Then
+// when the predecessor is finished, the Qnode releases a WakeUp
+// which passes the lock to his successor.
+//
+// If neither LR or SCs are used, this module acts as a simple
+// wiring from
 //
 // Nomenclature:
 // LRReq         : Load reserved req going from Snitch to TCDM
@@ -39,7 +45,6 @@ module lrwait_qnode
   input logic            clk_i,
   input logic            rst_ni,
 
-  // TCDM Ports
   // Snitch side
   // requests
   input  logic [31:0]    snitch_qaddr_i,
@@ -116,7 +121,7 @@ module lrwait_qnode
   // define next node pointer
   typedef struct packed {
     // indicates if a reservation can be active
-    logic        valid;
+    logic                 valid;
     // pointer to successor by having metadata for successor
     // this metadata is sent to the tcdm and then used to send a wakeup
     // to the next core using the metadata stored here
@@ -124,7 +129,7 @@ module lrwait_qnode
 
     // used to match requests and responses and check if we received response
     // for instruction observed
-    meta_id_t instruction_id;
+    meta_id_t             instruction_id;
 
     // indicates which reservation the load reserved points to
     logic [AddrWidth-1:0] addr;
@@ -132,7 +137,6 @@ module lrwait_qnode
 
   next_node_t             next_node_d, next_node_q;
   `FF(next_node_q, next_node_d, 1'b0, clk_i, rst_ni);
-
 
   // assign pass through signals
   assign tile_qstrb_o    = snitch_qstrb_i;
@@ -178,14 +182,11 @@ module lrwait_qnode
       Idle: begin
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
+          // if a LRReq passes, store the address
           if (amo_op_t'(snitch_qamo_i) == AMOLR) begin
             next_node_d.instruction_id = snitch_qid_i;
             next_node_d.addr           = snitch_qaddr_i;
             next_node_d.valid          = 1'b1;
-          end
-          if (amo_op_t'(snitch_qamo_i) == AMOSC) begin
-            // a SC without reservations passes
-            $fatal("Always place a reservation for an SC");
           end
         end
         // a response arrives
@@ -209,7 +210,6 @@ module lrwait_qnode
         if (snitch_qvalid_i && tile_qready_i) begin
           if (amo_op_t'(snitch_qamo_i) == AMOLR) begin
             // a core issued another reservation
-            $fatal("Core issued another LR while LR was still active");
           end else if ((amo_op_t'(snitch_qamo_i) == AMOSC)) begin
             if ((next_node_q.addr == snitch_qaddr_i) &&
                 (next_node_q.valid == 1'b1)) begin
@@ -217,8 +217,6 @@ module lrwait_qnode
               next_node_d.instruction_id = snitch_qid_i;
               next_node_d.addr           = snitch_qaddr_i;
               sc_req_arrived_d           = 1'b1;
-            end else begin
-              $fatal("Yes, always place a reservation for an SC");
             end
           end
         end
@@ -262,13 +260,13 @@ module lrwait_qnode
               sc_req_arrived_d           = 1'b1;
               state_d                    = SendWakeUp;
             end else begin
-              $fatal("no reservation for SC");
+              // $fatal("no reservation for SC");
             end
           end else if (sc_req_arrived_d == 1'b1) begin // if ((amo_op_t'(snitch_qamo_i) == AMOSC))
-            $fatal("Only send one SC per reservation");
+            // $fatal("Only send one SC per reservation");
           end
         end // if (snitch_qvalid_i && tile_qready_i)
-      end
+      end // case: InLRQueue
 
       SendWakeUp: begin
         sc_req_arrived_d  = 1'b0;
@@ -313,12 +311,46 @@ module lrwait_qnode
 
 `ifndef VERILATOR
   illegal_transition : assert property(
-                                       @(posedge clk_i) disable iff (~rst_ni) ((state_q == InLRQueue)|=> not (state_q == Idle)))
+    @(posedge clk_i) disable iff (~rst_ni) ((state_q == InLRQueue)|=> not (state_q == Idle)))
     else $fatal (1, "Trying to do an illegal transition going from InLRQueue to Idle");
+
+  // Assert that SendWakeUp state is eventually left
   leave_send_wakeup : assert property(
-                                      @(posedge clk_i) disable iff (~rst_ni) ((state_q == SendWakeUp)|=> (state_q == SendWakeUp)
-                                                                              or (state_q == Idle)))
+    @(posedge clk_i) disable iff (~rst_ni) ((state_q == SendWakeUp)|=>
+                                            (state_q == SendWakeUp) || (state_q == Idle)))
     else $fatal (1, "SendWakeUp did not succeed");
+
+  // if qnode is in an idle state, it is not allowed to receive a SC
+  // A SC has to be preceeded by a LR
+  lr_before_sc : assert property(
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == Idle) &&
+                                             (snitch_qvalid_i && tile_qready_i)) |->
+                                            ~(amo_op_t'(snitch_qamo_i) == AMOSC)))
+    else $fatal (1, "A SC was sent without a preceding LR");
+
+  // nested LRs are disallowed. This includes issuing a reservation again or
+  // sending a reservation to another location
+  no_nested_lr : assert property(
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == ReadyForSC) &&
+                                             (snitch_qvalid_i && tile_qready_i)) |->
+                                            ~(amo_op_t'(snitch_qamo_i) == AMOLR)))
+    else $fatal (1, "Another LR was issued while the previous LR was still active.");
+
+  // an SC has to go to an address that has been reserved before and no SC has occurred so far
+  sc_to_valid_address : assert property(
+    @(posedge clk_i) disable iff (~rst_ni) ((((state_q == ReadyForSC) || (state_q == InLRQueue)) &&
+                                             ((snitch_qvalid_i && tile_qready_i) &&
+                                             (amo_op_t'(snitch_qamo_i) == AMOSC)))|->
+                                            ((next_node_q.addr == snitch_qaddr_i) &&
+                                             (next_node_q.valid == 1'b1))))
+    else $fatal (1, "The SC was not preceeded by a LR to the same address.");
+
+  only_one_sc_per_lr : assert property(
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == InLRQueue) &&
+                                             (snitch_qvalid_i && tile_qready_i) &&
+                                             (amo_op_t'(snitch_qamo_i) == AMOSC))|->
+                                             !sc_req_arrived_q))
+    else $fatal (1, "More than one SC was sent for a LR");
 `endif
   // pragma translate_on
 
