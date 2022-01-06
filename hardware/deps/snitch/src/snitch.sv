@@ -152,7 +152,9 @@ module snitch
     AMOMin  = 4'h8,
     AMOMinu = 4'h9,
     AMOLR   = 4'hA,
-    AMOSC   = 4'hB
+    AMOSC   = 4'hB,
+    LRWAIT  = 4'hC,
+    SCWAIT  = 4'hD
   } ls_amo;
 
   logic [31:0] ld_result;
@@ -1323,6 +1325,31 @@ module snitch
         end
       end
 /* end of Xpulpimg extension */
+
+      /* XLRWait extension */
+      riscv_instr::LRWAIT_W: begin
+        alu_op = BypassA;
+        write_rd = 1'b0;
+        uses_rd = 1'b1;
+        is_load = 1'b1;
+        is_signed = 1'b1;
+        ls_size = Word;
+        ls_amo = LRWAIT;
+        opa_select = Reg;
+        opb_select = Reg;
+      end
+      riscv_instr::SCWAIT_W: begin
+        alu_op = BypassA;
+        write_rd = 1'b0;
+        uses_rd = 1'b1;
+        is_load = 1'b1;
+        is_signed = 1'b1;
+        ls_size = Word;
+        ls_amo = SCWAIT;
+        opa_select = Reg;
+        opb_select = Reg;
+      end
+      /* XLRWait extension */
 
       // TODO(zarubaf): Illegal Instructions
       default: begin

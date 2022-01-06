@@ -56,7 +56,9 @@ module snitch_axi_adapter #(
     AMOMin  = 4'h8,
     AMOMinu = 4'h9,
     AMOLR   = 4'hA,
-    AMOSC   = 4'hB
+    AMOSC   = 4'hB,
+    LRWAIT  = 4'hC,
+    SCWAIT  = 4'hD
   } amo_op_t;
 
   typedef struct packed {
