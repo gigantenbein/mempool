@@ -23,7 +23,7 @@ package tcdm_tb_pkg;
   localparam int   NumIterations    = 100;
 
   // randomize address and payloads for TCDM
-  localparam logic FULL_RANDOM_TEST = 1;
+  localparam logic FULL_RANDOM_TEST = 0;
   // print requests sent and received
   localparam logic VERBOSE          = 0;
   // if valid, delay raising of ready flag at output of TCDM adapter
