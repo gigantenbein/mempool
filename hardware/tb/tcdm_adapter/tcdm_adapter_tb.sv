@@ -417,9 +417,9 @@ endclass : TcdmRequest // TcdmRequest
       //           "address",   addr);
     end
     unique case (amo)
-      4'hA: goldenmodel_tcdm[tcdm_index].load_reserved(.addr(addr),
+      4'hC: goldenmodel_tcdm[tcdm_index].load_reserved(.addr(addr),
                                                        .metadata(metadata));
-      4'hB: goldenmodel_tcdm[tcdm_index].store_conditional(.addr(addr),
+      4'hD: goldenmodel_tcdm[tcdm_index].store_conditional(.addr(addr),
                                                            .metadata(metadata),
                                                            .data(data));
       4'h0: begin
@@ -473,7 +473,7 @@ class Generator;
       rand_data < 32000;
     }
     else {
-      rand_addr inside {1, 64, 127, 42, 12, 15};
+      rand_addr inside {1, 2, 3, 520};
       // generate random data
       rand_data > 0;
       rand_data < 32000;
@@ -994,7 +994,7 @@ endclass // Scoreboard
                          input int     core_id);
     req[core_id].addr    = addr;
     req[core_id].data    = data;
-    req[core_id].amo     = 4'hB;
+    req[core_id].amo     = 4'hD;
     req[core_id].wen     = 1'b0;
     req[core_id].be      = 4'hF;
     req[core_id].core_id = core_id;
@@ -1007,7 +1007,7 @@ endclass // Scoreboard
                      input int    core_id);
     req[core_id].addr    = addr;
     req[core_id].data    = data;
-    req[core_id].amo     = 4'hA;
+    req[core_id].amo     = 4'hC;
     req[core_id].wen     = 1'b0;
     req[core_id].be      = 4'h0;
     req[core_id].core_id = core_id;
