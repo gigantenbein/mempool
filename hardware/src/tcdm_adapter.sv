@@ -61,18 +61,20 @@ module tcdm_adapter #(
                              LrWaitEnable;
 
   typedef enum logic [3:0] {
-      AMONone = 4'h0,
-      AMOSwap = 4'h1,
-      AMOAdd  = 4'h2,
-      AMOAnd  = 4'h3,
-      AMOOr   = 4'h4,
-      AMOXor  = 4'h5,
-      AMOMax  = 4'h6,
-      AMOMaxu = 4'h7,
-      AMOMin  = 4'h8,
-      AMOMinu = 4'h9,
-      AMOLR   = 4'hA,
-      AMOSC   = 4'hB
+    AMONone = 4'h0,
+    AMOSwap = 4'h1,
+    AMOAdd  = 4'h2,
+    AMOAnd  = 4'h3,
+    AMOOr   = 4'h4,
+    AMOXor  = 4'h5,
+    AMOMax  = 4'h6,
+    AMOMaxu = 4'h7,
+    AMOMin  = 4'h8,
+    AMOMinu = 4'h9,
+    AMOLR   = 4'hA,
+    AMOSC   = 4'hB,
+    LRWAIT  = 4'hC,
+    SCWAIT  = 4'hD
   } amo_op_t;
 
   logic meta_valid,  meta_ready;
@@ -98,13 +100,13 @@ module tcdm_adapter #(
   logic [31:0] amo_result, amo_result_q;
 
   // signals for DistLRWait
-  // LR that arrives is a wake_up_req
+  // LRWait that arrives is a wake_up_req
   logic        wake_up_req;
 
-  // LR that should be sent is a successor update
+  // LRWait that should be sent is a successor update
   logic        successor_update_d, successor_update_q;
 
-  // indicate if request was a SC
+  // indicate if request was a SCWait
   logic        sc_active;
   logic        sc_successful_d, sc_successful_q;
 
@@ -145,7 +147,7 @@ module tcdm_adapter #(
 
   assign in_meta = (wake_up_req || successor_update_d) ? lrwait_meta : in_meta_i;
 
-  // In case of a SC we must forward SC result from the cycle earlier.
+  // In case of a SCWait we must forward SCWait result from the cycle earlier.
   // wake_up_data_q is implicitly zero-padded form MetaWidth to DataWidth
   assign out_rdata = sc_active ? !sc_successful_q :
                      (successor_update_q ? wake_up_data_q : out_rdata_i);
@@ -171,17 +173,17 @@ module tcdm_adapter #(
 
     // the reservation structure builds up a MCS queue in hardware with the
     // tail node in front of the TCDM bank. The nodes pointing to a successor
-    // are located in front of the core issuing a LR
-    // An additional head node is needed, to prevent SCs without a reservation
+    // are located in front of the core issuing a LRWait
+    // An additional head node is needed, to prevent SCWaits without a reservation
     // from succeeding
     typedef struct packed {
-      // needed to prevent rogue SCs from succeeding
+      // needed to prevent rogue SCWaits from succeeding
       logic        head_valid;
       // indicate if tail points to a real core
       logic        tail_valid;
       // addr of reservation
       logic [AddrWidth-1:0] addr;
-      // head of queue who can issue successful SCs
+      // head of queue who can issue successful SCWaits
       metadata_t            head;
       metadata_t            tail;
     } queue_reservation_t;
@@ -190,7 +192,7 @@ module tcdm_adapter #(
 
     `FF(reservation_q, reservation_d, 1'b0, clk_i, rst_ni);
     `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
-    `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC),
+    `FF(sc_active, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == SCWAIT),
         1'b0, clk_i, rst_ni);
 
     // check for free reservation node
@@ -258,10 +260,10 @@ module tcdm_adapter #(
 
       if (in_valid_i && in_ready_o) begin
         // a request arrives
-        if ((amo_op_t'(in_amo_i) == AMOLR)) begin
-          // a LR was issued
+        if ((amo_op_t'(in_amo_i) == LRWAIT)) begin
+          // a LRWait was issued
           if(in_meta_i.lrwait == 1'b1) begin
-            // the LR is a wake-up request from a Qnode
+            // the LRWait is a wake-up request from a Qnode
             wake_up_req = 1'b1;
             // extract metadata
             // cast from data to lrwait
@@ -274,9 +276,9 @@ module tcdm_adapter #(
             reservation_d[current_idx].head_valid = 1'b1;
             reservation_d[current_idx].head = lrwait_meta;
 
-            // if an LR, check if we have space for new reservation
+            // if an LRWait, check if we have space for new reservation
           end else if (!(all_nodes_full) || addr_match) begin
-            // it is a normal LR
+            // it is a normal LRWait
             if((in_meta_i == reservation_q[current_idx].head)
                && (reservation_q[current_idx].head_valid == 1'b1)
                && (in_address_i == reservation_q[current_idx].addr)) begin
@@ -310,8 +312,8 @@ module tcdm_adapter #(
               reservation_d[current_idx].addr       = in_address_i;
             end
           end
-        end else if ((amo_op_t'(in_amo_i) == AMOSC)) begin // if ((amo_op_t'(in_amo_i) == AMOLR))
-          // indicate that an SC is active
+        end else if ((amo_op_t'(in_amo_i) == SCWAIT)) begin // if ((amo_op_t'(in_amo_i) == LRWAIT))
+          // indicate that an SCWait is active
           if (in_meta_i == reservation_q[current_idx].head &&
               reservation_q[current_idx].head_valid == 1'b1 &&
               in_address_i == reservation_q[current_idx].addr ) begin
@@ -347,7 +349,7 @@ end
     in_ready_o  = in_valid_o && !in_ready_i ? 1'b0 : 1'b1;
     out_req_o   = in_valid_i && in_ready_o;
     out_add_o   = in_address_i;
-    out_write_o = in_write_i || (sc_successful_d && (amo_op_t'(in_amo_i) == AMOSC));
+    out_write_o = in_write_i || (sc_successful_d && (amo_op_t'(in_amo_i) == SCWAIT));
     out_wdata_o = in_wdata_i;
     out_be_o    = in_be_i;
 
@@ -357,7 +359,7 @@ end
     unique case (state_q)
       Idle: begin
         if(in_valid_i && in_ready_o &&
-           !(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC})) begin
+           !(amo_op_t'(in_amo_i) inside {AMONone, LRWAIT, SCWAIT})) begin
           load_amo = 1'b1;
           state_d = DoAMO;
         end
