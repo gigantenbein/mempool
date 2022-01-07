@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: SHL-0.51
 
 // Description: The Qnode implements a queue in fashion of a linked
-// list for ordering Load-Reserved(LR) to the TCDM adapter. Instead
-// of queueing up all LRs directly in front of the TCDM, the queue
+// list for ordering Load-Reserved(LRWait) to the TCDM adapter. Instead
+// of queueing up all LRWaits directly in front of the TCDM, the queue
 // is distributed to each core sending the reservation and to the
-// tcdm_adapter itself. When the core is part of LR queue the Qnode
+// tcdm_adapter itself. When the core is part of LRWait queue the Qnode
 // contains a "pointer" in the form of metadata to its successor.
 //
 // The Qnode is the storage of this "pointer" to the next hart. So
@@ -15,23 +15,23 @@
 // when the predecessor is finished, the Qnode releases a WakeUp
 // which passes the lock to his successor.
 //
-// If neither LR or SCs are used, this module acts as a simple
-// wiring from
+// If neither LRWait or SCWaits are used, this module acts as a simple
+// wiring from Snitch to the interconnect and will be optimized away.
 //
 // Nomenclature:
-// LRReq         : Load reserved req going from Snitch to TCDM
-// LRResp        : Load reserved resp going from TCDM to Snitch
-// SCReq         : Store conditional req going from Snitch to TCDM
-// SCResp        : Store conditional resp coming from TCDM to Snitch
-// SuccUpdate    : Successor update sent by TCDM when a Load reserved at the
-//                 the TCDM arrives and the Tail node is already occupied. The
-//                 tail node is then replaced with the requester and a
-//                 SuccUpdate is sent to the core that was in the Tail node
-//                 previously
-//                 The LRWait bit in the metadata is asserted.
-// WakeUpReq     : Req going to TCDM with payload containing the metadata which
-//                 core to wake up next
-//                 The LRWait bit in the metadata is asserted.
+// LRWaitReq  : Load reserved req going from Snitch to TCDM
+// LRWaitResp : Load reserved resp going from TCDM to Snitch
+// SCWaitReq  : Store conditional req going from Snitch to TCDM
+// SCWaitResp : Store conditional resp coming from TCDM to Snitch
+// SuccUpdate : Successor update sent by TCDM when a Load reserved at the
+//              the TCDM arrives and the Tail node is already occupied. The
+//              tail node is then replaced with the requester and a
+//              SuccUpdate is sent to the core that was in the Tail node
+//              previously
+//              The LRWaitWait bit in the metadata is asserted.
+// WakeUpReq  : Req going to TCDM with payload containing the metadata which
+//              core to wake up next
+//              The LRWaitWait bit in the metadata is asserted.
 //
 // Author: Marc Gantenbein
 
@@ -100,22 +100,24 @@ module lrwait_qnode
                              idx_width(NumTilesPerGroup) + 1;
 
   typedef enum logic [3:0] {
-      AMONone = 4'h0,
-      AMOSwap = 4'h1,
-      AMOAdd  = 4'h2,
-      AMOAnd  = 4'h3,
-      AMOOr   = 4'h4,
-      AMOXor  = 4'h5,
-      AMOMax  = 4'h6,
-      AMOMaxu = 4'h7,
-      AMOMin  = 4'h8,
-      AMOMinu = 4'h9,
-      AMOLR   = 4'hA,
-      AMOSC   = 4'hB
+    AMONone = 4'h0,
+    AMOSwap = 4'h1,
+    AMOAdd  = 4'h2,
+    AMOAnd  = 4'h3,
+    AMOOr   = 4'h4,
+    AMOXor  = 4'h5,
+    AMOMax  = 4'h6,
+    AMOMaxu = 4'h7,
+    AMOMin  = 4'h8,
+    AMOMinu = 4'h9,
+    AMOLR   = 4'hA,
+    AMOSC   = 4'hB,
+    LRWAIT  = 4'hC,
+    SCWAIT  = 4'hD
   } amo_op_t;
 
   enum logic [1:0] {
-      Idle, ReadyForSC, InLRQueue, SendWakeUp
+    Idle, ReadyForSCWait, InLRWaitQueue, SendWakeUp
   } state_q, state_d;
 
   // define next node pointer
@@ -143,7 +145,7 @@ module lrwait_qnode
   assign tile_qwrite_o   = snitch_qwrite_i;
   assign snitch_perror_o = tile_perror_i;
 
-  // signal to check if a SC corresponding to a LR already passed
+  // signal to check if a SCWait corresponding to a LRWait already passed
   logic sc_req_arrived_d, sc_req_arrived_q;
   `FF(sc_req_arrived_q, sc_req_arrived_d, 1'b0, clk_i, rst_ni);
 
@@ -178,12 +180,12 @@ module lrwait_qnode
 
     // FSM
     unique case (state_q)
-      // Wait for LR to start
+      // Wait for LRWait to start
       Idle: begin
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
-          // if a LRReq passes, store the address
-          if (amo_op_t'(snitch_qamo_i) == AMOLR) begin
+          // if a LRWaitReq passes, store the address
+          if (amo_op_t'(snitch_qamo_i) == LRWAIT) begin
             next_node_d.instruction_id = snitch_qid_i;
             next_node_d.addr           = snitch_qaddr_i;
             next_node_d.valid          = 1'b1;
@@ -192,28 +194,26 @@ module lrwait_qnode
         // a response arrives
         if (tile_pvalid_i) begin
           if (snitch_pready_i) begin
-            // It has to be either a LRResp or a SCResp
+            // It has to be either a LRWaitResp or a SCWaitResp
             if((tile_pid_i == next_node_q.instruction_id) &&
                (next_node_q.valid == 1'b1)) begin
-              state_d = ReadyForSC;
+              state_d = ReadyForSCWait;
             end
           end else if (tile_plrwait_i == 1'b1) begin
             // we are waiting for a response and now have received a SuccUpdate
             next_node_d.metadata = tile_pdata_i[MetaWidth-1:0];
-            state_d = InLRQueue;
+            state_d = InLRWaitQueue;
           end
         end
       end // case: Idle
 
-      ReadyForSC: begin
+      ReadyForSCWait: begin
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
-          if (amo_op_t'(snitch_qamo_i) == AMOLR) begin
-            // a core issued another reservation
-          end else if ((amo_op_t'(snitch_qamo_i) == AMOSC)) begin
+          if ((amo_op_t'(snitch_qamo_i) == SCWAIT)) begin
             if ((next_node_q.addr == snitch_qaddr_i) &&
                 (next_node_q.valid == 1'b1)) begin
-              // SC matches address of reservation
+              // SCWait matches address of reservation
               next_node_d.instruction_id = snitch_qid_i;
               next_node_d.addr           = snitch_qaddr_i;
               sc_req_arrived_d           = 1'b1;
@@ -231,11 +231,11 @@ module lrwait_qnode
               // and a request can arrive at the same time
               state_d = SendWakeUp;
             end else begin
-              state_d = InLRQueue;
+              state_d = InLRWaitQueue;
             end
           end else if(tile_pid_i == next_node_q.instruction_id) begin
-            // it is a SCResp, we can go back to Idle since we are sure
-            // that no SC update will arrive now until the next LR/SC
+            // it is a SCWaitResp, we can go back to Idle since we are sure
+            // that no SCWait update will arrive now until the next LRWait/SCWait
             // cycle
             if(snitch_pready_i == 1'b1) begin
               // only go back to idle when handshake happened
@@ -246,34 +246,34 @@ module lrwait_qnode
             end
           end
         end
-      end // case: WaitForSC
+      end // case: WaitForSCWait
 
-      InLRQueue: begin
+      InLRWaitQueue: begin
         // a request arrives
         if (snitch_qvalid_i && tile_qready_i) begin
-          if ((amo_op_t'(snitch_qamo_i) == AMOSC)) begin
+          if ((amo_op_t'(snitch_qamo_i) == SCWAIT)) begin
             if ((next_node_q.addr == snitch_qaddr_i) &&
                 (next_node_q.valid == 1'b1)) begin
-              // SC matches address of reservation
+              // SCWait matches address of reservation
               next_node_d.instruction_id = snitch_qid_i;
               next_node_d.addr           = snitch_qaddr_i;
               sc_req_arrived_d           = 1'b1;
               state_d                    = SendWakeUp;
             end else begin
-              // $fatal("no reservation for SC");
+              // $fatal("no reservation for SCWait");
             end
-          end else if (sc_req_arrived_d == 1'b1) begin // if ((amo_op_t'(snitch_qamo_i) == AMOSC))
-            // $fatal("Only send one SC per reservation");
+          end else if (sc_req_arrived_d == 1'b1) begin // if ((amo_op_t'(snitch_qamo_i) == SCWAIT))
+            // $fatal("Only send one SCWait per reservation");
           end
         end // if (snitch_qvalid_i && tile_qready_i)
-      end // case: InLRQueue
+      end // case: InLRWaitQueue
 
       SendWakeUp: begin
         sc_req_arrived_d  = 1'b0;
         next_node_d.valid = 1'b0;
 
         // send wake up
-        tile_qamo_o    = AMOLR;
+        tile_qamo_o    = LRWAIT;
         tile_qaddr_o   = next_node_q.addr;
 
         // set metadata and set lrwait flag
@@ -311,8 +311,8 @@ module lrwait_qnode
 
 `ifndef VERILATOR
   illegal_transition : assert property(
-    @(posedge clk_i) disable iff (~rst_ni) ((state_q == InLRQueue)|=> not (state_q == Idle)))
-    else $fatal (1, "Trying to do an illegal transition going from InLRQueue to Idle");
+    @(posedge clk_i) disable iff (~rst_ni) ((state_q == InLRWaitQueue)|=> not (state_q == Idle)))
+    else $fatal (1, "Trying to do an illegal transition going from InLRWaitQueue to Idle");
 
   // Assert that SendWakeUp state is eventually left
   leave_send_wakeup : assert property(
@@ -320,37 +320,37 @@ module lrwait_qnode
                                             (state_q == SendWakeUp) || (state_q == Idle)))
     else $fatal (1, "SendWakeUp did not succeed");
 
-  // if qnode is in an idle state, it is not allowed to receive a SC
-  // A SC has to be preceeded by a LR
+  // if qnode is in an idle state, it is not allowed to receive a SCWait
+  // A SCWait has to be preceeded by a LRWait
   lr_before_sc : assert property(
     @(posedge clk_i) disable iff (~rst_ni) (((state_q == Idle) &&
                                              (snitch_qvalid_i && tile_qready_i)) |->
-                                            ~(amo_op_t'(snitch_qamo_i) == AMOSC)))
-    else $fatal (1, "A SC was sent without a preceding LR");
+                                            ~(amo_op_t'(snitch_qamo_i) == SCWAIT)))
+    else $fatal (1, "A SCWait was sent without a preceding LRWait");
 
-  // nested LRs are disallowed. This includes issuing a reservation again or
+  // nested LRWaits are disallowed. This includes issuing a reservation again or
   // sending a reservation to another location
   no_nested_lr : assert property(
-    @(posedge clk_i) disable iff (~rst_ni) (((state_q == ReadyForSC) &&
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == ReadyForSCWait) &&
                                              (snitch_qvalid_i && tile_qready_i)) |->
-                                            ~(amo_op_t'(snitch_qamo_i) == AMOLR)))
-    else $fatal (1, "Another LR was issued while the previous LR was still active.");
+                                            ~(amo_op_t'(snitch_qamo_i) == LRWAIT)))
+    else $fatal (1, "Another LRWait was issued while the previous LRWait was still active.");
 
-  // an SC has to go to an address that has been reserved before and no SC has occurred so far
+  // an SCWait has to go to an address that has been reserved before and no SCWait has occurred so far
   sc_to_valid_address : assert property(
-    @(posedge clk_i) disable iff (~rst_ni) ((((state_q == ReadyForSC) || (state_q == InLRQueue)) &&
+    @(posedge clk_i) disable iff (~rst_ni) ((((state_q == ReadyForSCWait) || (state_q == InLRWaitQueue)) &&
                                              ((snitch_qvalid_i && tile_qready_i) &&
-                                             (amo_op_t'(snitch_qamo_i) == AMOSC)))|->
+                                             (amo_op_t'(snitch_qamo_i) == SCWAIT)))|->
                                             ((next_node_q.addr == snitch_qaddr_i) &&
                                              (next_node_q.valid == 1'b1))))
-    else $fatal (1, "The SC was not preceeded by a LR to the same address.");
+    else $fatal (1, "The SCWait was not preceeded by a LRWait to the same address.");
 
   only_one_sc_per_lr : assert property(
-    @(posedge clk_i) disable iff (~rst_ni) (((state_q == InLRQueue) &&
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == InLRWaitQueue) &&
                                              (snitch_qvalid_i && tile_qready_i) &&
-                                             (amo_op_t'(snitch_qamo_i) == AMOSC))|->
+                                             (amo_op_t'(snitch_qamo_i) == SCWAIT))|->
                                              !sc_req_arrived_q))
-    else $fatal (1, "More than one SC was sent for a LR");
+    else $fatal (1, "More than one SCWait was sent for a LRWait");
 `endif
   // pragma translate_on
 
