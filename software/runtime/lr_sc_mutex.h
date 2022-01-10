@@ -36,6 +36,16 @@ static inline uint32_t load_reserved(volatile void* const address)
   return value;
 }
 
+static inline uint32_t load_reserved_wait(volatile void* const address)
+{
+  uint32_t value;
+  __asm__ __volatile__ ("" : : : "memory");
+  asm volatile("lrwait.w %0, (%1)" : "=r"(value) : "r"(address));
+  __asm__ __volatile__ ("" : : : "memory");
+  return value;
+}
+
+
 /**
  * Expose the store-conditional instruction. Only stores a value if a previously
  * made reservation has not been broken by another core.
@@ -53,6 +63,15 @@ static inline int32_t store_conditional(volatile void* const address, uint32_t c
   int32_t result;
   __asm__ __volatile__ ("" : : : "memory");
   asm volatile("sc.w %0, %1, (%2)" : "=r"(result) : "r"(value), "r"(address));
+  __asm__ __volatile__ ("" : : : "memory");
+  return result;
+}
+
+static inline int32_t store_conditional_wait(volatile void* const address, uint32_t const value)
+{
+  int32_t result;
+  __asm__ __volatile__ ("" : : : "memory");
+  asm volatile("scwait.w %0, %1, (%2)" : "=r"(result) : "r"(value), "r"(address));
   __asm__ __volatile__ ("" : : : "memory");
   return result;
 }

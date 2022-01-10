@@ -12,18 +12,10 @@
 #include "encoding.h"
 #include "lr_sc_mutex.h"
 #include "mcs_mutex.h"
-#include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
 
-void shift_lfsr(uint32_t *lfsr)
-{
-  *lfsr ^= *lfsr >> 7;
-  *lfsr ^= *lfsr << 9;
-  *lfsr ^= *lfsr >> 13;
-}
-
-uint32_t NUMBER_OF_CYCLES = 1000;
+uint32_t NUMBER_OF_CYCLES = 50000;
 
 uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
 
@@ -54,7 +46,7 @@ int main() {
     // Initialize series of bins and all of them to zero
     for (int i = 0; i<NBINS; i++){
       hist_bins[i] =0;
-      
+
 #if MUTEX == 1
       hist_locks[i] = amo_allocate_mutex();
 #elif MUTEX == 2
@@ -86,12 +78,12 @@ int main() {
   mempool_timer_t start_time = mempool_get_timer();
 
   uint32_t hist_iterations = 0;
+  uint32_t random_number = 0;
   mempool_timer_t countdown = 0;
 
-  while(countdown < NUMBER_OF_CYCLES) {
-    // needs seed as pointer
-    shift_lfsr(&init_lfsr);
-    drawn_number = init_lfsr % NBINS;
+  while(countdown < NUMBER_OF_CYCLES + start_time) {
+    asm volatile("csrr %0, mscratch" : "=r"(random_number));
+    drawn_number = random_number % NBINS;
 #if MUTEX == 1
     amo_lock_mutex(hist_locks[drawn_number]);
     hist_bins[drawn_number] += 1;
@@ -106,22 +98,22 @@ int main() {
     lrwait_wakeup_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
 #else
     do {
-      bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+      bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
       lr_counter += 1;
-    } while(store_conditional((hist_bins+drawn_number), bin_value));
+    } while(store_conditional_wait((hist_bins+drawn_number), bin_value));
 #endif
     hist_iterations++;
-    countdown = mempool_get_timer() - start_time;
+    countdown = mempool_get_timer();
   }
 
   write_csr(time, hist_iterations++);
-  
+
 #if MUTEX==0
   write_csr(99, lr_counter);
 #endif
 
   mempool_barrier(num_cores);
-  
+
   // if(core_id == 0) {
   //   uint32_t sum = 0;
   //   for (uint32_t i = 0; i<NBINS; i++){

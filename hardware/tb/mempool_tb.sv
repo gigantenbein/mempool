@@ -50,6 +50,7 @@ module mempool_tb;
   initial begin
     clk   = 1'b1;
     rst_n = 1'b0;
+    $random(42);
 
     repeat (5)
       #(ClockPeriod);
