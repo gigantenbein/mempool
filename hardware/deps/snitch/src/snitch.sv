@@ -1416,6 +1416,10 @@ module snitch
           csr_rvalue = instret_q[63:32];
         end
         `endif
+        // csr register for getting random number
+        riscv_instr::CSR_MSCRATCH: begin
+          csr_rvalue = $urandom(hart_id_i);
+        end
         default: begin
           csr_rvalue = '0;
           csr_dump = 1'b1;
