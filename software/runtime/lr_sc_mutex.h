@@ -17,7 +17,6 @@
  */
 typedef volatile uint32_t lr_sc_mutex_t;
 
-
 /**
  * Expose the load-reserved instruction. Loads a word from a specified
  * address and creates a reservation.
@@ -35,16 +34,6 @@ static inline uint32_t load_reserved(volatile void* const address)
   __asm__ __volatile__ ("" : : : "memory");
   return value;
 }
-
-static inline uint32_t load_reserved_wait(volatile void* const address)
-{
-  uint32_t value;
-  __asm__ __volatile__ ("" : : : "memory");
-  asm volatile("lrwait.w %0, (%1)" : "=r"(value) : "r"(address));
-  __asm__ __volatile__ ("" : : : "memory");
-  return value;
-}
-
 
 /**
  * Expose the store-conditional instruction. Only stores a value if a previously
@@ -67,6 +56,36 @@ static inline int32_t store_conditional(volatile void* const address, uint32_t c
   return result;
 }
 
+/**
+ * Expose the custom load reserved wait instructions. Loads a word from a specified
+ * address and creates a reservation. Only receive a response to the load reserved
+ * wait when you are the first core in the queue
+ *
+ * @param   address     Pointer to the address to create reservation and load
+ *                      the value from.
+ *
+ * @return  Value currently stored in memory.
+ */
+static inline uint32_t load_reserved_wait(volatile void* const address)
+{
+  uint32_t value;
+  __asm__ __volatile__ ("" : : : "memory");
+  asm volatile("lrwait.w %0, (%1)" : "=r"(value) : "r"(address));
+  __asm__ __volatile__ ("" : : : "memory");
+  return value;
+}
+
+/**
+ * Expose the store-conditional instruction. Only stores a value if a previously
+ * made reservation has not been broken by another core. Nested LRWait/SCWaits are
+ * not allowed
+ *
+ * @param   address     A pointer to an address on L2 memory to store the value.
+ * @param   value       Value to store.
+ *
+ * @return  0: Store was successful, the reservation was still valid.
+ *          1: Reservation was broken, no store happened.
+ */
 static inline int32_t store_conditional_wait(volatile void* const address, uint32_t const value)
 {
   int32_t result;

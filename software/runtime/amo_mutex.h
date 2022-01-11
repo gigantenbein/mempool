@@ -18,6 +18,16 @@
 
 typedef uint32_t volatile amo_mutex_t;
 
+static inline uint32_t amo_add(void volatile *const address, uint32_t value) {
+  uint32_t ret;
+  asm volatile("" : : : "memory");
+  asm volatile("amoadd.w  %0, %1, (%2)"
+               : "=r"(ret)
+               : "r"(value), "r"(address));
+  asm volatile("" : : : "memory");
+  return ret;
+}
+
 //
 // Expose the atomic swap instruction.
 //
