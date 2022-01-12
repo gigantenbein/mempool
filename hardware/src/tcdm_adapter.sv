@@ -121,10 +121,12 @@ module tcdm_adapter #(
   localparam int unsigned IniAddrWidth = idx_width(NumCoresPerTile + NumGroups);
 
   logic sc_successful_d, sc_successful_q;
+  logic [CoreIdWidth-1:0] sc_count_d, sc_count_q;
+
   logic sc_q;
 
   // In case of a SC we must forward SC result from the cycle earlier.
-  assign out_rdata = (sc_q && LrScEnable) ? $unsigned(!sc_successful_q) : out_rdata_i;
+  assign out_rdata = (sc_q && LrScEnable) ? $unsigned(sc_count_q) : out_rdata_i;
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
@@ -162,6 +164,8 @@ module tcdm_adapter #(
     `FF(reservation_q, reservation_d, 1'b0, clk_i, rst_ni);
     `FF(sc_q, in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC), 1'b0, clk_i, rst_ni);
 
+    `FF(sc_count_q, sc_count_d, 1'b0, clk_i, rst_ni);
+
     always_comb begin
       // {group_id, tile_id, core_id}
       // MSB of ini_addr determines if request is coming from local or remote tile
@@ -179,6 +183,9 @@ module tcdm_adapter #(
 
       reservation_d = reservation_q;
       sc_successful_d = 1'b0;
+
+      sc_count_d = sc_count_q;
+
       // new valid transaction
       if (in_valid_i && in_ready_o) begin
 
@@ -203,6 +210,9 @@ module tcdm_adapter #(
             (in_address_i == reservation_q.addr) &&
             (!(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC}) || in_write_i)) begin
           reservation_d.valid = 1'b0;
+
+          // reset counter if reservation broken
+          sc_count_d = '0;
         end
 
         // An SC from the same hart clears any pending reservation.
@@ -210,6 +220,12 @@ module tcdm_adapter #(
             && reservation_q.core == unique_core_id) begin
           reservation_d.valid = 1'b0;
           sc_successful_d = (reservation_q.addr == in_address_i);
+          if (reservation_q.addr == in_address_i) begin
+            sc_count_d = '0;
+          end
+        // if SC failed, increase
+        end else if (reservation_q.valid && amo_op_t'(in_amo_i) == AMOSC) begin
+          sc_count_d = sc_count_q + 1;
         end
       end
     end // always_comb
