@@ -207,16 +207,18 @@ module tcdm_adapter #(
     `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
     `FF(wake_up_data_q, wake_up_data_d, 1'b0, clk_i, rst_ni);
 
-    // check for free reservation node
     localparam int unsigned NodeIdxWidth = $clog2(NumLrWaitAddr);
 
-    logic [NodeIdxWidth-1:0] current_idx;
     logic                    all_nodes_full;
     logic                    addr_match;
+    logic [NodeIdxWidth-1:0] node_idx;
 
+    // check for free reservation node
     if (NumLrWaitAddr > 1) begin : gen_multip_lrwait_nodes
       logic [NumLrWaitAddr-1:0] idx_matches_addr;
       logic [NumLrWaitAddr-1:0] node_is_free;
+      logic [NumLrWaitAddr-1:0] node_is_available;
+
       for (genvar a = 0; a < NumLrWaitAddr; a++) begin
         assign idx_matches_addr[a] = in_valid_i
                                      && (lrwait_reservation_q[a].addr == in_address_i)
@@ -224,21 +226,14 @@ module tcdm_adapter #(
         assign node_is_free[a] = !lrwait_reservation_q[a].tail_valid;
       end
 
-      logic [NodeIdxWidth-1:0]    node_idx;
-      logic [NodeIdxWidth-1:0]    node_is_free_idx;
-
-      onehot_to_bin #(
-        .ONEHOT_WIDTH ( NumLrWaitAddr )
-      ) i_id_ohb_in (
-        .onehot ( idx_matches_addr ),
-        .bin    ( node_idx         )
-      );
-
       // if no node is free, the LRWait queue is full
       assign all_nodes_full = ~|(node_is_free);
 
       // addr match means we can pick an existing node
       assign addr_match = |idx_matches_addr;
+
+      // pick an existing node or one that is free
+      assign node_is_available = addr_match ? idx_matches_addr : node_is_free;
 
       // find free index for address
       // Find the first free index
@@ -246,15 +241,13 @@ module tcdm_adapter #(
         .WIDTH ( NumLrWaitAddr ),
         .MODE  ( 0             ) // Start at index 0.
       ) i_ld_free_lzc (
-        .in_i    ( node_is_free     ),
-        .cnt_o   ( node_is_free_idx ),
+        .in_i    ( node_is_available),
+        .cnt_o   ( node_idx         ),
         .empty_o ( /*unused*/       )
       );
 
-      assign current_idx = addr_match ? node_idx : node_is_free_idx;
     end else begin : single_lrwait_node // block: gen_multip_lrwait_nodes
-
-      assign current_idx    = 1'b0;
+      assign node_idx       = 1'b0;
       assign all_nodes_full = 1'b0;
       assign addr_match     = 1'b1;
     end
@@ -262,8 +255,8 @@ module tcdm_adapter #(
     always_comb begin
       lrwait_reservation_d = lrwait_reservation_q;
 
-      lrwait_meta = '0;
-      wake_up_req = 1'b0;
+      lrwait_meta    = '0;
+      wake_up_req    = 1'b0;
       wake_up_data_d = wake_up_data_q;
 
       successor_update_d = 1'b0;
@@ -280,75 +273,74 @@ module tcdm_adapter #(
             // extract metadata
             // cast from data to lrwait
             lrwait_meta = in_wdata_i;
-
-            // tie lrwait to 0 since it is not needed
             lrwait_meta.lrwait = 1'b0;
 
             // set incoming metadata as head
-            lrwait_reservation_d[current_idx].head_valid = 1'b1;
-            lrwait_reservation_d[current_idx].head = lrwait_meta;
+            lrwait_reservation_d[node_idx].head_valid = 1'b1;
+            lrwait_reservation_d[node_idx].head = lrwait_meta;
 
             // if an LRWait, check if we have space for new reservation
           end else if (!(all_nodes_full) || addr_match) begin
             // it is a normal LRWait
-            if((in_meta_i == lrwait_reservation_q[current_idx].head)
-               && (lrwait_reservation_q[current_idx].head_valid == 1'b1)
-               && (in_address_i == lrwait_reservation_q[current_idx].addr)) begin
+            if((in_meta_i == lrwait_reservation_q[node_idx].head)
+               && (lrwait_reservation_q[node_idx].head_valid == 1'b1)
+               && (in_address_i == lrwait_reservation_q[node_idx].addr)) begin
               // core issued a reservation again
               // make sure the reservation is still valid
-              lrwait_reservation_d[current_idx].head_valid = 1'b1;
-            end else if ((lrwait_reservation_q[current_idx].tail_valid == 1'b1)
-                         && (in_address_i == lrwait_reservation_q[current_idx].addr)) begin
+              lrwait_reservation_d[node_idx].head_valid = 1'b1;
+            end else if ((lrwait_reservation_q[node_idx].tail_valid == 1'b1)
+                         && (in_address_i == lrwait_reservation_q[node_idx].addr)) begin
               // there is somebody in the queue
               // prepare successor update
               // load data into read register
               wake_up_data_d = in_meta_i;
 
               // get metadata from tail
-              lrwait_meta = lrwait_reservation_q[current_idx].tail;
+              lrwait_meta = lrwait_reservation_q[node_idx].tail;
               // set as successor update
               lrwait_meta.lrwait = 1'b1;
 
               // set as tail node
-              lrwait_reservation_d[current_idx].tail = in_meta_i;
+              lrwait_reservation_d[node_idx].tail = in_meta_i;
 
               // prevent request on SRAM
               successor_update_d = 1'b1;
             end else begin
               // the queue has been empty
               // set yourself as head and tail node
-              lrwait_reservation_d[current_idx].tail       = in_meta_i;
-              lrwait_reservation_d[current_idx].tail_valid = 1'b1;
-              lrwait_reservation_d[current_idx].head       = in_meta_i;
-              lrwait_reservation_d[current_idx].head_valid = 1'b1;
-              lrwait_reservation_d[current_idx].addr       = in_address_i;
+              lrwait_reservation_d[node_idx].tail       = in_meta_i;
+              lrwait_reservation_d[node_idx].tail_valid = 1'b1;
+              lrwait_reservation_d[node_idx].head       = in_meta_i;
+              lrwait_reservation_d[node_idx].head_valid = 1'b1;
+              lrwait_reservation_d[node_idx].addr       = in_address_i;
             end
           end
         end else if ((amo_op_t'(in_amo_i) == SCWAIT)) begin // if ((amo_op_t'(in_amo_i) == LRWAIT))
-          if (in_meta_i == lrwait_reservation_q[current_idx].head &&
-              lrwait_reservation_q[current_idx].head_valid == 1'b1 &&
-              in_address_i == lrwait_reservation_q[current_idx].addr ) begin
+          if (in_meta_i == lrwait_reservation_q[node_idx].head &&
+              lrwait_reservation_q[node_idx].head_valid == 1'b1 &&
+              in_address_i == lrwait_reservation_q[node_idx].addr ) begin
             sc_lrwait_successful_d = 1'b1;
             // invalidate reservation
-            lrwait_reservation_d[current_idx].head_valid = 1'b0;
-            if (lrwait_reservation_q[current_idx].head == lrwait_reservation_q[current_idx].tail) begin
+            lrwait_reservation_d[node_idx].head_valid = 1'b0;
+            if (lrwait_reservation_q[node_idx].head == lrwait_reservation_q[node_idx].tail) begin
               // if head and tail match, it was the only node in the queue
-              lrwait_reservation_d[current_idx].tail_valid = 1'b0;
+              lrwait_reservation_d[node_idx].tail_valid = 1'b0;
             end
           end else begin
             sc_lrwait_successful_d = 1'b0;
           end
-          // check whether another core has made a write attempt or an AMO occured
-        end else if ((in_address_i == lrwait_reservation_q[current_idx].addr) &&
+
+        // check whether another core has made a write attempt or an AMO occured
+        end else if ((in_address_i == lrwait_reservation_q[node_idx].addr) &&
                      (!(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC, LRWAIT, SCWAIT}) ||
                       in_write_i ||
-                      (amo_op_t'(in_amo_i) == AMOSC) && sc_lrwait_successful_d)) begin
+                      ((amo_op_t'(in_amo_i) == AMOSC) && sc_lrwait_successful_d))) begin
 
           // a write occurred to a reserved location
-          lrwait_reservation_d[current_idx].head_valid = 1'b0;
-          if (lrwait_reservation_q[current_idx].head == lrwait_reservation_q[current_idx].tail) begin
+          lrwait_reservation_d[node_idx].head_valid = 1'b0;
+          if (lrwait_reservation_q[node_idx].head == lrwait_reservation_q[node_idx].tail) begin
             // if head and tail match, it was the only node in the queue
-            lrwait_reservation_d[current_idx].tail_valid = 1'b0;
+            lrwait_reservation_d[node_idx].tail_valid = 1'b0;
           end
         end
       end // if (in_valid_i && in_ready_o)
@@ -368,10 +360,10 @@ module tcdm_adapter #(
   // ----------------
 
   if (LrScEnable) begin : gen_lrsc
-    // unique core identifier, does not necessarily match core_id
     localparam int unsigned CoreIdWidth  = idx_width(NumCores);
     localparam int unsigned IniAddrWidth = idx_width(NumCoresPerTile + NumGroups);
 
+    // unique core identifier, does not necessarily match core_id
     logic [CoreIdWidth:0] unique_core_id;
 
     typedef struct packed {
