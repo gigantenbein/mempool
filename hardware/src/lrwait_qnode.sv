@@ -141,9 +141,7 @@ module lrwait_qnode
   `FF(next_node_q, next_node_d, 1'b0, clk_i, rst_ni);
 
   // assign pass through signals
-  assign tile_qstrb_o    = snitch_qstrb_i;
-  assign tile_qwrite_o   = snitch_qwrite_i;
-  assign snitch_perror_o = tile_perror_i;
+
 
   // signal to check if a SCWait corresponding to a LRWait already passed
   logic sc_req_arrived_d, sc_req_arrived_q;
@@ -159,10 +157,14 @@ module lrwait_qnode
   assign snitch_pvalid_o = pass_through_response ? tile_pvalid_i   : 1'b0;
   assign snitch_pdata_o  = pass_through_response ? tile_pdata_i    : 1'b0;
   assign snitch_pid_o    = pass_through_response ? tile_pid_i      : 1'b0;
+  assign snitch_perror_o = pass_through_response ? tile_perror_i   : '0;
 
   // always allow handshakes except when inserting WakeUp
   assign pass_through_request = (state_q == SendWakeUp) ? 1'b0 : 1'b1;
-  assign snitch_qready_o = pass_through_request ? tile_qready_i   : 1'b0;
+  assign snitch_qready_o      = pass_through_request ? tile_qready_i   : 1'b0;
+  assign tile_qstrb_o         = pass_through_request ? snitch_qstrb_i  : '0;
+  assign tile_qwrite_o        = pass_through_request ? snitch_qwrite_i : '0;
+
 
   always_comb begin
     state_d          = state_q;

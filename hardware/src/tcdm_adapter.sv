@@ -175,8 +175,11 @@ module tcdm_adapter #(
   assign pop_meta   = pop_resp || discard_meta;
 
   // Generate out_gnt one cycle after sending read request to the bank
-  `FF(out_gnt, (out_req_o && !out_write_o) || sc_successful_d || successor_update_d,
-      1'b0, clk_i, rst_ni);
+  `FF(out_gnt, (out_req_o && !out_write_o) ||
+               sc_successful_d ||
+               successor_update_d ||
+               (lrwait_active_q),
+               1'b0, clk_i, rst_ni);
 
   // Or the signal from SC and SCWait
   if (LrWaitEnable || LrScEnable) begin
@@ -385,7 +388,9 @@ module tcdm_adapter #(
             lrwait_reservation_d[node_idx].addr        = in_address_q;
           end
         end
-      end if (scwait_active_q == 1'b1) begin // if (lrwait_active_q == 1'b1)
+      end // if (lrwait_active_q == 1'b1)
+
+      if (scwait_active_q == 1'b1) begin
         scwait_active_d = 1'b0;
 
         if (addr_match) begin
@@ -407,14 +412,20 @@ module tcdm_adapter #(
         end
 
         // check whether another core written to the memory location has a reservation
-      end else if (write_occurred_q == 1'b1 && addr_match) begin
-        // a write occurred to a reserved location
-        lrwait_reservation_d[node_idx].head_valid = 1'b0;
-        if (lrwait_reservation_q[node_idx].head == lrwait_reservation_q[node_idx].tail) begin
-          // if head and tail match, it was the only node in the queue
-          lrwait_reservation_d[node_idx].tail_valid = 1'b0;
+      end // if (scwait_active_q == 1'b1)
+
+      if (write_occurred_q == 1'b1) begin // if (scwait_active_q == 1'b1)
+        write_occurred_d = 1'b0;
+        if (addr_match) begin
+          // a write occurred to a reserved location
+          lrwait_reservation_d[node_idx].head_valid = 1'b0;
+          if (lrwait_reservation_q[node_idx].head == lrwait_reservation_q[node_idx].tail) begin
+            // if head and tail match, it was the only node in the queue
+            lrwait_reservation_d[node_idx].tail_valid = 1'b0;
+          end
         end
-      end
+      end // if (write_occurred_q == 1'b1)
+
     end // always_comb
   end else begin: disable_lrwait // block: gen_lrwait
     assign sc_lrwait_successful_d = 1'b0;
@@ -536,7 +547,8 @@ module tcdm_adapter #(
     end
 
     out_add_o   = (lrwait_active_q || scwait_active_q) ? in_address_q : in_address_i;
-    out_write_o = in_write_i || sc_successful_d;
+    out_write_o = (lrwait_active_q || scwait_active_q) ?
+                  sc_successful_d : (in_write_i || sc_successful_d);
     out_wdata_o = (lrwait_active_q || scwait_active_q) ? in_wdata_q : in_wdata_i;
     out_be_o    = (lrwait_active_q || scwait_active_q) ? in_be_q : in_be_i;
 

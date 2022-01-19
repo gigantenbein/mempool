@@ -143,9 +143,9 @@ module tcdm_adapter_tb;
     assign tile_req_xbar_in[c].meta.lrwait  = tile_req[c].meta.lrwait;
 
     // directly wire part of meta id not needed in qnode to stream_xbar
-    assign tile_req_xbar_in[c].meta.ini_addr = snitch_req[c].meta.ini_addr;
-    assign tile_req_xbar_in[c].meta.tile_id  = snitch_req[c].meta.tile_id;
-    assign tile_req_xbar_in[c].meta.core_id  = snitch_req[c].meta.core_id;
+    assign tile_req_xbar_in[c].meta.ini_addr = get_metadata_from_core_id(c).ini_addr;
+    assign tile_req_xbar_in[c].meta.tile_id  = get_metadata_from_core_id(c).tile_id;
+    assign tile_req_xbar_in[c].meta.core_id  = get_metadata_from_core_id(c).core_id;
 
 
     lrwait_qnode #(
@@ -209,7 +209,7 @@ module tcdm_adapter_tb;
       // External priority flag
       .rr_i   ('0                          ),
       // Master
-      .data_i (tile_req_xbar_in           ),
+      .data_i (tile_req_xbar_in            ),
       .valid_i(tile_req_valid_o            ),
       .ready_o(tile_req_ready_i            ),
       .sel_i  (select_tcdm_bank            ),
@@ -563,12 +563,21 @@ endclass : Generator
 class InputDriver;
   // shorthand for core_index
   local int core_index;
+  bank_metadata_t meta;
 
   function new(input int core_id);
     // initialize qnode interface
     core_index = core_id;
     snitch_req[core_index] = '0;
     snitch_req_valid[core_index] = '0;
+
+    // tie metadata that is generated in interconnect
+    // to core id of core driving
+    meta = get_metadata_from_core_id(.abs_core_id(core_index));
+    snitch_req[core_index].meta.ini_addr = meta.ini_addr;
+    snitch_req[core_index].meta.tile_id  = meta.tile_id;
+    snitch_req[core_index].meta.core_id  = meta.core_id;
+
   endfunction
 
   task send_request_from_core(input TcdmRequest req);
@@ -585,10 +594,6 @@ class InputDriver;
     snitch_req_valid[core_index] = 1'b1;
     // rest of metadata is not needed in qnode, pass directly to queue
     // tile_req_xbar_in[core_index] = tile_req[core_index];
-
-    snitch_req[core_index].meta.ini_addr = req.meta.ini_addr;
-    snitch_req[core_index].meta.tile_id  = req.meta.tile_id;
-    snitch_req[core_index].meta.core_id  = req.meta.core_id;
 
     do begin
       wait(snitch_req_ready[core_index]);
