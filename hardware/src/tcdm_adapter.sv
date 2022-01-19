@@ -547,7 +547,8 @@ module tcdm_adapter #(
     end
 
     out_add_o   = (lrwait_active_q || scwait_active_q) ? in_address_q : in_address_i;
-    out_write_o = in_write_i || sc_successful_d;
+    out_write_o = (lrwait_active_q || scwait_active_q) ?
+                  sc_successful_d : (in_write_i || sc_successful_d);
     out_wdata_o = (lrwait_active_q || scwait_active_q) ? in_wdata_q : in_wdata_i;
     out_be_o    = (lrwait_active_q || scwait_active_q) ? in_be_q : in_be_i;
 
