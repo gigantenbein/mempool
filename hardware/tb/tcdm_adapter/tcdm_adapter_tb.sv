@@ -695,6 +695,7 @@ class GoldenTCDM;
 
   // create a queue for each adress that is reserved
   reservation_queue_t reservation_queues[bank_addr_t];
+  logic               reservation_queues_valid[bank_addr_t];
 
   data_t              resp_data;
   bank_metadata_t     resp_metadata;
@@ -714,7 +715,7 @@ class GoldenTCDM;
   function void write_access(input bank_addr_t addr,
                              input data_t data);
     if (VERBOSE) begin
-      $display("write access");
+      $display("write access addr %h ", addr);
     end
     // add write access to mock memory
     mock_memory[addr] = data;
@@ -724,9 +725,10 @@ class GoldenTCDM;
     if (reservation_queues.exists(addr) &&
         reservation_queues[addr].size() != 0) begin
       if (VERBOSE) begin
-        $display("pop reservation");
+        $display("set reservation to invalid");
       end
-      void'(reservation_queues[addr].pop_front());
+      reservation_queues_valid[addr]=1'b0;
+      // void'(reservation_queues[addr].pop_front());
     end
   endfunction; // write_access
 
@@ -789,6 +791,7 @@ class GoldenTCDM;
         // all queue nodes are occupied, but an occupied node contains the same
         // address
         if (reservation_queues[addr].size() == 0) begin
+          // this case can never happen?
           queue_is_full = 1;
         end else begin
           queue_is_full = 0;
@@ -806,7 +809,7 @@ class GoldenTCDM;
         // has a reservation already been placed in the queue?
         if (reservation_queues[addr].size() == 0) begin
           if (VERBOSE) begin
-            $display("reservation queue empty, response sending");
+            $display("reservation queue empty, responsen sending");
             $display("Push reservation with metadata %b", metadata);
           end
 
@@ -816,6 +819,7 @@ class GoldenTCDM;
 
           // push reservation onto LRWait queue
           reservation_queues[addr].push_back(metadata);
+          reservation_queues_valid[addr]=1'b1;
 
         // check if core issuing LR already holds a reservation
         end else if (match_metadata_for_core_id(.meta1(reservation_queues[addr][0]),
@@ -826,6 +830,24 @@ class GoldenTCDM;
           // core at head of queue issued another reservation
           respdriver[req_core_id].expected_data_resp.push_back(resp_data);
           respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+          reservation_queues_valid[addr]=1'b1;
+        end else if (reservation_queues[addr].size() == 1 &&
+                     reservation_queues_valid[addr] == 1'b0) begin
+          // the core was the only one in the queue and his head node has been
+          // invalidated by a write, the next core can overwrite the reservation
+          $display("It happened!");
+
+          // pop the old reservation
+          void'(reservation_queues[addr].pop_front());
+
+          // response can be sent
+          respdriver[req_core_id].expected_data_resp.push_back(resp_data);
+          respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+
+          // push reservation onto LRWait queue
+          reservation_queues[addr].push_back(metadata);
+          reservation_queues_valid[addr]=1'b1;
+
         end else begin
           // there already is somebody in the queue
           // append yourself to the queue
@@ -845,6 +867,7 @@ class GoldenTCDM;
 
         // push reservation onto LRWait queue
         reservation_queues[addr].push_back(metadata);
+        reservation_queues_valid[addr]=1'b1;
       end // else: !if(reservation_queues.exists(addr))
     end else begin
       // queue is full, we sent the LR response directly
@@ -869,17 +892,33 @@ class GoldenTCDM;
 
     // check if reservation is valid
     // take head of LR queue
+
+    // check if there is a queue for the current address
     if (reservation_queues.exists(addr)) begin
       if (VERBOSE) begin
         $display("store conditional reservation %h ", reservation_queues[addr][0]);
       end
+
       if (reservation_queues[addr].size() != 0) begin
         if (match_metadata_for_core_id(.meta1(reservation_queues[addr][0]),
                                        .meta2(metadata))) begin
-          // metadata matches, issue SC
-          mock_memory[addr] = data;
-          respdriver[req_core_id].expected_data_resp.push_back(1'b0);
-          respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+          // check if the reservation has not been invalidated by a write
+          if (reservation_queues_valid[addr] == 1'b1) begin
+            // metadata matches, issue SC
+            mock_memory[addr] = data;
+            respdriver[req_core_id].expected_data_resp.push_back(1'b0);
+            respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+            if (VERBOSE) begin
+              $display("store conditional succeeded");
+            end
+          end else begin
+            // reservation was invalidated, SC failed
+            respdriver[req_core_id].expected_data_resp.push_back(1'b1);
+            respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+            if (VERBOSE) begin
+              $display("store conditional failed due to rogue write");
+            end
+          end
 
           // pop reservation
           void'(reservation_queues[addr].pop_front());
@@ -889,12 +928,15 @@ class GoldenTCDM;
             resp_core_id = get_core_id_as_int(.meta(resp_metadata));
             if (VERBOSE) begin
               $display("Send out load reserved to core %d", resp_core_id);
+              $display("status %d", generator[resp_core_id].core_status);
             end
+            reservation_queues_valid[addr]=1'b1;
+
             respdriver[resp_core_id].expected_data_resp.push_back(mock_memory[addr]);
             respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
           end
         end else begin
-          // sc failed
+          // sc failed since metadata did not match head of queue
           if (VERBOSE) begin
             $display("store conditional failed");
           end
@@ -902,7 +944,7 @@ class GoldenTCDM;
           respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
         end
       end else begin
-        // SC failed
+        // SC failed since queue for address is empty
         if (VERBOSE) begin
           if (reservation_queues[addr].size() != 0) begin
             $display("metadata %b reservation in queue %b", metadata, reservation_queues[addr][0]);
@@ -915,7 +957,7 @@ class GoldenTCDM;
         respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
       end
     end else begin
-      // sc failed
+      // sc failed since there is no queue for the address
       if (VERBOSE) begin
         $display("store conditional failed");
       end
