@@ -140,9 +140,6 @@ module lrwait_qnode
   next_node_t             next_node_d, next_node_q;
   `FF(next_node_q, next_node_d, 1'b0, clk_i, rst_ni);
 
-  // assign pass through signals
-
-
   // signal to check if a SCWait corresponding to a LRWait already passed
   logic sc_req_arrived_d, sc_req_arrived_q;
   `FF(sc_req_arrived_q, sc_req_arrived_d, 1'b0, clk_i, rst_ni);
@@ -157,14 +154,14 @@ module lrwait_qnode
   assign snitch_pvalid_o = pass_through_response ? tile_pvalid_i   : 1'b0;
   assign snitch_pdata_o  = pass_through_response ? tile_pdata_i    : 1'b0;
   assign snitch_pid_o    = pass_through_response ? tile_pid_i      : 1'b0;
-  assign snitch_perror_o = pass_through_response ? tile_perror_i   : '0;
+  assign snitch_perror_o = pass_through_response ? tile_perror_i   : 1'b0;
 
   // always allow handshakes except when inserting WakeUp
   assign pass_through_request = (state_q == SendWakeUp) ? 1'b0 : 1'b1;
   assign snitch_qready_o      = pass_through_request ? tile_qready_i   : 1'b0;
-  assign tile_qstrb_o         = pass_through_request ? snitch_qstrb_i  : '0;
-  assign tile_qwrite_o        = pass_through_request ? snitch_qwrite_i : '0;
 
+  assign tile_qwrite_o        = pass_through_request ? snitch_qwrite_i : 1'b0;
+  assign tile_qstrb_o         = pass_through_request ? snitch_qstrb_i  : '0;
 
   always_comb begin
     state_d          = state_q;
@@ -279,8 +276,7 @@ module lrwait_qnode
         tile_qlrwait_o = 1'b1;
 
         // store metadata of successor in payload
-        // TODO: replace with datawidth
-        tile_qdata_o                = 32'b0;
+        tile_qdata_o                = '0;
         tile_qdata_o[MetaWidth-1:0] = next_node_q.metadata;
 
         tile_qvalid_o  = 1'b1;
@@ -336,7 +332,8 @@ module lrwait_qnode
 
   // an SCWait has to go to an address that has been reserved before and no SCWait has occurred so far
   sc_to_valid_address : assert property(
-    @(posedge clk_i) disable iff (~rst_ni) ((((state_q == ReadyForSCWait) || (state_q == InLRWaitQueue)) &&
+    @(posedge clk_i) disable iff (~rst_ni) ((((state_q == ReadyForSCWait) ||
+                                              (state_q == InLRWaitQueue)) &&
                                              ((snitch_qvalid_i && tile_qready_i) &&
                                              (amo_op_t'(snitch_qamo_i) == SCWAIT)))|->
                                             ((next_node_q.addr == snitch_qaddr_i) &&

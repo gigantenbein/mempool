@@ -301,7 +301,6 @@ module tcdm_adapter #(
       lrwait_active_d = lrwait_active_q;
       scwait_active_d = scwait_active_q;
 
-
       in_address_d     = in_address_q;
       in_wdata_d       = in_wdata_q;
       in_be_d          = in_be_q;
@@ -670,6 +669,10 @@ module tcdm_adapter #(
   // Check for unsupported parameters
   if (DataWidth != 32) begin
     $error($sformatf("Module currently only supports DataWidth = 32. DataWidth is currently set to: %0d", DataWidth));
+  end
+
+  if (NumLrWaitAddr < 1) begin
+    $error($sformatf("Invalid number of LrWaitAddr chose, has to be at least 1", NumLrWaitAddr));
   end
 
   `ifndef VERILATOR
