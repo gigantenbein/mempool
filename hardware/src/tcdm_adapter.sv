@@ -305,7 +305,7 @@ module tcdm_adapter #(
       in_address_d     = in_address_q;
       in_wdata_d       = in_wdata_q;
       in_be_d          = in_be_q;
-      write_occurred_d = write_occurred_q;
+      write_occurred_d = 1'b0;
 
       discard_meta = 1'b0;
 
@@ -385,6 +385,7 @@ module tcdm_adapter #(
             lrwait_reservation_d[node_idx].head        = in_meta_o;
             lrwait_reservation_d[node_idx].head.lrwait = 1'b0;
             lrwait_reservation_d[node_idx].head_valid  = 1'b1;
+
             lrwait_reservation_d[node_idx].addr        = in_address_q;
           end
         end
@@ -394,34 +395,47 @@ module tcdm_adapter #(
         scwait_active_d = 1'b0;
 
         if (addr_match) begin
-          if (in_meta_o == lrwait_reservation_q[node_idx].head &&
-              lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
-            // the metadata matches the entry in the head node
-            // thus the SC comes from the same core as the LR
-            // we do not need to check the address since we
-            // already check that with the node_idx
-            sc_lrwait_successful_d = 1'b1;
+          if (in_meta_o == lrwait_reservation_q[node_idx].head) begin
+            // if head is invalid, a write or amo invalidated reservation
+            if (lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
 
-            // We set the head to invalid s.t. only one SC can occur
-            lrwait_reservation_d[node_idx].head_valid = 1'b0;
-            if (lrwait_reservation_q[node_idx].head == lrwait_reservation_q[node_idx].tail) begin
-              // if head and tail match, it was the only node in the queue
+              // the metadata matches the entry in the head node
+              // thus the SC comes from the same core as the LR
+              // we do not need to check the address since we
+              // already check that with the node_idx
+              sc_lrwait_successful_d = 1'b1;
+
+              // We set the head to invalid s.t. only one SC can occur
+              lrwait_reservation_d[node_idx].head_valid = 1'b0;
+            end
+
+            // if head and tail match, it was the only node in the queue
+            // and no successor update can arrive
+            if (lrwait_reservation_q[node_idx].head ==
+                lrwait_reservation_q[node_idx].tail) begin
               lrwait_reservation_d[node_idx].tail_valid = 1'b0;
             end
           end
         end
-
-        // check whether another core written to the memory location has a reservation
       end // if (scwait_active_q == 1'b1)
 
-      if (write_occurred_q == 1'b1) begin // if (scwait_active_q == 1'b1)
-        write_occurred_d = 1'b0;
+      if (write_occurred_q == 1'b1) begin
         if (addr_match) begin
           // a write occurred to a reserved location
+          // we invalidate the head of the queue
           lrwait_reservation_d[node_idx].head_valid = 1'b0;
-          if (lrwait_reservation_q[node_idx].head == lrwait_reservation_q[node_idx].tail) begin
+
+          // if there is only one node in the queue, we discard
+          // the reservation completely
+          if (lrwait_reservation_q[node_idx].head ==
+              lrwait_reservation_q[node_idx].tail) begin
             // if head and tail match, it was the only node in the queue
             lrwait_reservation_d[node_idx].tail_valid = 1'b0;
+          end
+
+          // indicate that a reservation has been overwritten to the user
+          if (lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
+            $warning ("A write occurred to a reserved location.");
           end
         end
       end // if (write_occurred_q == 1'b1)
