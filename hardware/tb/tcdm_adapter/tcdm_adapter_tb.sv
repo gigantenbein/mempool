@@ -44,7 +44,7 @@ module tcdm_adapter_tb;
   // Simulation
   localparam ClockPeriod = 1ns;
   localparam TA          = 0.2ns; // Application time
-  localparam TT          = 0.8ns; // Test time
+  localparam TT          = 0.7ns; // Test time
 
   logic clk;
   logic rst_n;
@@ -399,47 +399,22 @@ class TcdmRequest;
   endfunction
 endclass : TcdmRequest // TcdmRequest
 
-
-  function void pass_request_to_goldenmodel_tcdm(input TcdmRequest req);
-
-    automatic bank_addr_t     addr     = req.addr[TCDMAddrMemWidth-1:0];
-    automatic logic           wen      = req.wen;
-    automatic amo_t           amo      = req.amo;
-    automatic data_t          data     = req.data;
-    automatic bank_metadata_t metadata = req.meta;
-
-    automatic int tcdm_index = unsigned'(req.addr[TCDMAddrMemWidth + SelTcdmWidth-1:TCDMAddrMemWidth]);
-
-    if (VERBOSE) begin
-      // $display( "%s %h ||  %s %b ||  %s %b ",
-      //           "request:",  amo,
-      //           "metadata:", metadata,
-      //           "address",   addr);
-    end
-    unique case (amo)
-      4'hC: goldenmodel_tcdm[tcdm_index].load_reserved(.addr(addr),
-                                                       .metadata(metadata));
-      4'hD: goldenmodel_tcdm[tcdm_index].store_conditional(.addr(addr),
-                                                           .metadata(metadata),
-                                                           .data(data));
-      4'h0: begin
-        if (wen) begin
-          goldenmodel_tcdm[tcdm_index].write_access(.addr(addr), .data(data));
-        end else begin
-          goldenmodel_tcdm[tcdm_index].read_access(.addr(addr), .metadata(metadata));
-        end
-      end
-      default: $display("Unknown request");
-    endcase; // unique case (amo)
-  endfunction // pass_request_to_goldenmodel_tcdm
-
-
 typedef enum logic [1:0] {
   Active        = 2'h0,
   WaitForResp   = 2'h1,
   WaitForLRResp = 2'h2,
   DoSCNext      = 2'h3
 } core_status_t;
+
+  // check if all generators are finished
+  function int all_generators_finished();
+    for(int i = 0; i < NumActiveCores; i++) begin
+      if(!respdriver[i].finished_generator) begin
+        return 0;
+      end
+    end
+    return 1;
+  endfunction
 
 // Description:
 // Draw a random core id and generate requests in a fixed order
@@ -468,12 +443,13 @@ class Generator;
       // pick a random address from possible addresses
       rand_addr > 0;
       rand_addr < NumTcdmBanks * TCDMSizePerBank;
+
       // generate random data
       rand_data > 0;
       rand_data < 32000;
     }
     else {
-      rand_addr inside {1, 2, 3, 520};
+      rand_addr inside {1,2,3,4,5};
       // generate random data
       rand_data > 0;
       rand_data < 32000;
@@ -493,16 +469,20 @@ class Generator;
         for (int i = 0; i < NumIterations; i++) begin
           generate_random_request(.iteration(i));
         end
-        // if the last request was a LR, do a SC so that
-        // other cores are unblocked
+
+        if ((core_status == WaitForResp) || (core_status == WaitForLRResp)) begin
+          wait((core_status == Active) || (core_status == DoSCNext));
+        end
+
         if (core_status == DoSCNext) begin
           store_conditional(.addr(rand_addr),.data(rand_data),.core_id(core_index));
           core_status = WaitForResp;
         end
-        // tell respdriver you are finished
 
-        #(1000*ClockPeriod);
+        wait(core_status == Active);
+
         respdriver[core_index].finished_generator = 1'b1;
+
       end
     join_none
   endtask
@@ -511,17 +491,12 @@ class Generator;
 
     // only generate SC request AFTER a LR has been issued
     // TODO store address during LR for subsequent LR
-    if (VERBOSE) begin
-      $display("iteration %d core %d", iteration, core_index);
-      $display("status %d core %d", core_status, core_index);
-    end
-
-    wait((core_status == Active) || (core_status == DoSCNext))
+    wait((core_status == Active) || (core_status == DoSCNext));
 
     unique case (core_status)
       Active: begin
         // get index for random instruction
-        random_draw = $urandom_range(0);
+        random_draw = $urandom_range(2);
         // get random address and random number
         if(!this.randomize()) begin
           $display("Failed to randomize Generator class.");
@@ -599,8 +574,6 @@ class InputDriver;
       wait(snitch_req_ready[core_index]);
       #(TT-TA);
     end while (snitch_req_ready[core_index] == 1'b0);
-
-    pass_request_to_goldenmodel_tcdm(.req(req));
 
     @(posedge clk);
     #(TA);
@@ -709,6 +682,77 @@ class GoldenTCDM;
   int                 number_of_active_queues;
   int                 queue_is_full;
 
+
+  task input_listener(input int tcdm_ind);
+    fork
+      // just wait for one respdriver to be finished since we are
+      // waiting for 1000 cycles after finishing anyways
+      while(all_generators_finished() == 0) begin
+        #(TA);
+        if(tcdm_req_valid[tcdm_ind] && tcdm_req_ready[tcdm_ind]) begin
+          // a new request arrives at the TCDM
+          #(TT-TA);
+          if(tcdm_req_valid[tcdm_ind] && tcdm_req_ready[tcdm_ind]) begin
+            pass_request_from_input_to_golden_model(.tcdm_ind(tcdm_ind));
+          end
+          @(posedge clk);
+        end
+      end
+    join_none
+  endtask // input_listener
+
+  function void pass_request_from_input_to_golden_model(input int tcdm_ind);
+    automatic bank_addr_t     addr     = tcdm_req[tcdm_ind].addr[TCDMAddrMemWidth-1:0];
+    automatic logic           wen      = tcdm_req[tcdm_ind].write;
+    automatic amo_t           amo      = tcdm_req[tcdm_ind].amo;
+    automatic data_t          data     = tcdm_req[tcdm_ind].wdata;
+    automatic bank_metadata_t metadata = tcdm_req[tcdm_ind].meta;
+
+    automatic int tcdm_index = unsigned'(tcdm_req[tcdm_ind].addr[TCDMAddrMemWidth + SelTcdmWidth-1:TCDMAddrMemWidth]);
+
+    if (VERBOSE) begin
+      $display( "%s %h ||  %s %b ||  %s %b ",
+                "request:",  amo,
+                "metadata:", metadata,
+                "address",   addr);
+    end
+
+    if (tcdm_index != tcdm_ind) begin
+      $fatal(1,"Sent request to wrong TCDM bank!");
+    end
+
+    unique case (amo)
+      4'hC: begin
+        if (metadata.lrwait == 1'b0) begin
+          goldenmodel_tcdm[tcdm_index].load_reserved(.addr(addr),
+                                                     .metadata(metadata));
+        end else begin
+          goldenmodel_tcdm[tcdm_index].load_reserved_wake_up(.addr(addr),
+                                                             .metadata(metadata),
+                                                             .data(data));
+        end
+      end
+
+      4'hD: goldenmodel_tcdm[tcdm_index].store_conditional(.addr(addr),
+                                                           .metadata(metadata),
+                                                           .data(data));
+      4'h0: begin
+        if (wen) begin
+          goldenmodel_tcdm[tcdm_index].write_access(.addr(addr), .data(data));
+        end else begin
+          goldenmodel_tcdm[tcdm_index].read_access(.addr(addr), .metadata(metadata));
+        end
+      end
+      default: $display("Unknown request");
+    endcase; // unique case (amo)
+  endfunction; // pass_request_from_input_to_golden_model
+
+
+  /* GOLDEN MODEL FUNCTIONS
+   *
+   */
+
+
   // Golden Model for write access to TCDM
   // Pop the reservation if one was available
   // No response is expected
@@ -728,7 +772,11 @@ class GoldenTCDM;
         $display("set reservation to invalid");
       end
       reservation_queues_valid[addr]=1'b0;
-      // void'(reservation_queues[addr].pop_front());
+
+      // if the only reservation has been invalidated, we can pop it
+      if (reservation_queues[addr].size() == 1) begin
+        void'(reservation_queues[addr].pop_front());
+      end
     end
   endfunction; // write_access
 
@@ -752,7 +800,8 @@ class GoldenTCDM;
                               input bank_metadata_t metadata);
     automatic int req_core_id = get_core_id_as_int(.meta(metadata));
     if (VERBOSE) begin
-      $display("load reserved addr %h metadata %h, core_id %d", addr, metadata, req_core_id);
+      $display("load reserved addr %h metadata %h, core_id %d",
+               addr, metadata, req_core_id);
     end
 
     // check if value loaded has already been written or if we output default
@@ -776,7 +825,6 @@ class GoldenTCDM;
           // there is a reservation queue for the current address
           number_of_active_queues += 1;
         end
-
         current_queue_size += reservation_queues[check_size].size();
       end while (reservation_queues.next(check_size) >= 1);
       if (VERBOSE) begin
@@ -788,10 +836,10 @@ class GoldenTCDM;
         // there is an empty queue node available
         queue_is_full = 0;
       end else if (reservation_queues.exists(addr)) begin
+
         // all queue nodes are occupied, but an occupied node contains the same
         // address
         if (reservation_queues[addr].size() == 0) begin
-          // this case can never happen?
           queue_is_full = 1;
         end else begin
           queue_is_full = 0;
@@ -823,7 +871,8 @@ class GoldenTCDM;
 
         // check if core issuing LR already holds a reservation
         end else if (match_metadata_for_core_id(.meta1(reservation_queues[addr][0]),
-                                                .meta2(metadata))) begin
+                                                .meta2(metadata))
+                    && reservation_queues_valid[addr] == 1'b1) begin
           if (VERBOSE) begin
             $display("Same core issued another reservation.");
           end
@@ -834,7 +883,8 @@ class GoldenTCDM;
         end else if (reservation_queues[addr].size() == 1 &&
                      reservation_queues_valid[addr] == 1'b0) begin
           // the core was the only one in the queue and his head node has been
-          // invalidated by a write, the next core can overwrite the reservation
+          // invalidated by a write or an SC occurred, the reservation can
+          // be overwritten
           $display("It happened!");
 
           // pop the old reservation
@@ -852,6 +902,7 @@ class GoldenTCDM;
           // there already is somebody in the queue
           // append yourself to the queue
           // push reservation onto LRWait queue
+
           reservation_queues[addr].push_back(metadata);
           if (VERBOSE) begin
             $display("There already is someone in the queue, wait for response.");
@@ -880,6 +931,61 @@ class GoldenTCDM;
 
   endfunction // load_reserved
 
+  function void load_reserved_wake_up(input bank_addr_t addr,
+                                      input bank_metadata_t metadata,
+                                      input data_t data);
+    automatic int req_core_id = get_core_id_as_int(.meta(metadata));
+    automatic int resp_core_id;
+    automatic bank_metadata_t resp_metadata;
+
+    if (VERBOSE) begin
+      $display("load reserved wake up addr %h metadata %h, from core_id %d",
+               addr, metadata, req_core_id);
+    end
+
+    // check if value loaded has already been written or if we output default
+    // value for an address in the SRAM
+    if (mock_memory.exists(addr)) begin
+      resp_data = mock_memory[addr];
+    end else begin
+      resp_data = 32'hffffffff;
+    end
+
+    // place reservation in queue
+    if (reservation_queues.exists(addr)) begin
+
+      // There needs to be more than 1 core in the queue when a wakeup request
+      // happens, the head will be popped since it has been invalidated by SC
+      // before
+      if (reservation_queues[addr].size() <= 1) begin
+        $warning("reservation queue should not be empty when receiving WakeUp.");
+      end
+
+      if (reservation_queues_valid[addr] != 1'b0) begin
+        $warning("Wakeup only allowed on a reservation that has been consumed by SC.");
+      end
+
+      // pop reservation which has been invalidated before
+      void'(reservation_queues[addr].pop_front());
+
+      // infer sucessor from new head of queue
+      resp_metadata = reservation_queues[addr][0];
+      resp_core_id = get_core_id_as_int(.meta(resp_metadata));
+      if (VERBOSE) begin
+        $display("Received WakeUp req, sending response to core %d", resp_core_id);
+      end
+
+      // response can be sent
+      respdriver[resp_core_id].expected_data_resp.push_back(resp_data);
+      respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
+
+      // set queue to valid again
+      reservation_queues_valid[addr] = 1'b1;
+    end else begin // if (reservation_queues.exists(addr))
+      $warning("Received LRWakeUp to an invalid address!");
+    end
+  endfunction // load_reserved_wake_up
+
   function void store_conditional(input bank_addr_t addr,
                                   input bank_metadata_t metadata,
                                   input data_t data);
@@ -887,7 +993,8 @@ class GoldenTCDM;
     automatic int resp_core_id;
 
     if (VERBOSE) begin
-      $display("store conditional addr %h metadata %h, core_id %d", addr, metadata, req_core_id);
+      $display("store conditional addr %h metadata %h, core_id %d",
+               addr, metadata, req_core_id);
     end
 
     // check if reservation is valid
@@ -908,6 +1015,9 @@ class GoldenTCDM;
             mock_memory[addr] = data;
             respdriver[req_core_id].expected_data_resp.push_back(1'b0);
             respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+            // invalidate reservation in any case
+            reservation_queues_valid[addr] = 1'b0;
+
             if (VERBOSE) begin
               $display("store conditional succeeded");
             end
@@ -919,21 +1029,14 @@ class GoldenTCDM;
               $display("store conditional failed due to rogue write");
             end
           end
-
-          // pop reservation
-          void'(reservation_queues[addr].pop_front());
-          if (reservation_queues[addr].size() != 0) begin
-
-            resp_metadata = reservation_queues[addr][0];
-            resp_core_id = get_core_id_as_int(.meta(resp_metadata));
-            if (VERBOSE) begin
-              $display("Send out load reserved to core %d", resp_core_id);
-              $display("status %d", generator[resp_core_id].core_status);
-            end
-            reservation_queues_valid[addr]=1'b1;
-
-            respdriver[resp_core_id].expected_data_resp.push_back(mock_memory[addr]);
-            respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
+          // if the reservation is the only one in the queue, we can pop it
+          // right away, else we need to wait for the wake up request to pop
+          // the old reservation, else it could happen that the reservation is
+          // invalidated although the LRResp has not already been sent to the
+          // successor
+          if (reservation_queues[addr].size() == 1) begin
+            // pop reservation
+            void'(reservation_queues[addr].pop_front());
           end
         end else begin
           // sc failed since metadata did not match head of queue
@@ -947,7 +1050,9 @@ class GoldenTCDM;
         // SC failed since queue for address is empty
         if (VERBOSE) begin
           if (reservation_queues[addr].size() != 0) begin
-            $display("metadata %b reservation in queue %b", metadata, reservation_queues[addr][0]);
+            $display("metadata %b reservation in queue %b",
+                     metadata,
+                     reservation_queues[addr][0]);
           end else begin
             $display("metadata %b no reservation was placed", metadata);
           end
@@ -1022,6 +1127,9 @@ class Scoreboard;
       end
     end // for (int c = 0; c < NumActiveCores; c++)
     $display("[%2d/%2d] responses match", total_success_count, total_resp_count);
+    if (total_success_count == total_resp_count) begin
+      $display("!                        SUCCESS                           !");
+    end
     $display("[EOC] Simulation ended at %t (retval = %0d).",
              $time, !(total_success_count == total_resp_count));
   endfunction // compare
@@ -1114,6 +1222,7 @@ endclass // Scoreboard
 
     for (int t = 0; t < NumTcdmBanks; t++) begin
       goldenmodel_tcdm[t] = new();
+      goldenmodel_tcdm[t].input_listener(.tcdm_ind(t));
     end
 
     for (int d = 0; d < NumActiveCores; d++) begin
