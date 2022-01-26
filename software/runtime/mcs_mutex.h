@@ -37,7 +37,7 @@ int32_t uninitialize_mcs_lock(mcs_lock_t *const lock){
   return 0;
 }
 
-int32_t lock_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
+int32_t lock_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node, uint32_t backoff){
   // check lock and set yourself as tail
   node->next = NULL;
   node->locked = 0;
@@ -53,14 +53,14 @@ int32_t lock_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
 
     // spin until your node is freed
     while (amo_swap(&node->locked,1)){
-      mempool_wait(1);
+      mempool_wait(backoff);
     }
   }
 
   return 0;
 }
 
-int32_t unlock_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
+int32_t unlock_mcs(mcs_lock_t *const lock, mcs_lock_t *const node, uint32_t backoff){
   mcs_lock_t* old_tail;
   mcs_lock_t* usurper;
   if (node->next == NULL) {
@@ -72,7 +72,7 @@ int32_t unlock_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
     }
     usurper = amo_swap(&(lock->next), old_tail);
     while(node->next == NULL) {
-      mempool_wait(1);
+      mempool_wait(backoff);
     }
     if (usurper != NULL) {
       // somebody got into the queue ahead of our victims
@@ -118,7 +118,7 @@ int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
   return 0;
 }
 
-int32_t lrwait_wakeup_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
+int32_t lrwait_wakeup_mcs(mcs_lock_t *const lock, mcs_lock_t *const node, uint32_t backoff){
   mcs_lock_t* old_tail;
   mcs_lock_t* usurper;
   if (node->next == NULL) {
@@ -130,7 +130,7 @@ int32_t lrwait_wakeup_mcs(mcs_lock_t *const lock, mcs_lock_t *const node){
     }
     usurper = amo_swap(&(lock->next), old_tail);
     while(node->next == NULL) {
-      mempool_wait(1);
+      mempool_wait(backoff);
     }
     if (usurper != NULL) {
       // somebody got into the queue ahead of our victims

@@ -13,9 +13,6 @@
 #include "runtime.h"
 #include "printf.h"
 
-#define ACTIVE_CORES 2
-#define BACKOFF 2
-
 typedef uint32_t volatile amo_mutex_t;
 
 static inline uint32_t amo_add(void volatile *const address, uint32_t value) {
@@ -64,8 +61,7 @@ static inline uint32_t amo_try_lock(amo_mutex_t *const mutex) {
 // @param   mutex       A pointer to the lock's memory location.
 // @param   backoff       A pointer to the lock's memory location.
 //
-static inline void amo_lock_mutex(amo_mutex_t *mutex) {
-  uint32_t backoff = BACKOFF * ACTIVE_CORES;
+static inline void amo_lock_mutex(amo_mutex_t *mutex, uint32_t backoff) {
   while (amo_try_lock(mutex)) {
     mempool_wait(backoff);
   }

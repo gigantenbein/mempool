@@ -120,9 +120,8 @@ static inline int32_t lr_sc_try_lock(lr_sc_mutex_t* const mutex)
  *
  * @param   mutex       A pointer to the lock's memory location.
  */
-static inline void lr_sc_lock_mutex(lr_sc_mutex_t* const mutex)
+static inline void lr_sc_lock_mutex(lr_sc_mutex_t* const mutex,   uint32_t backoff)
 {
-  uint32_t backoff = 5*NUM_CORES;
   while(lr_sc_try_lock(mutex))
     {
       mempool_wait(backoff);
@@ -138,6 +137,36 @@ static inline void lr_sc_unlock_mutex(lr_sc_mutex_t* const mutex)
 {
   __asm__ __volatile__ ("" : : : "memory");
   *mutex = 0;
+  __asm__ __volatile__ ("" : : : "memory");
+}
+
+static inline int32_t lrwait_try_lock(lr_sc_mutex_t* const mutex)
+{
+  if (*mutex)
+    {
+      return 1;
+    }
+  else
+    {
+      load_reserved_wait(mutex);
+      return store_conditional_wait(mutex, 1);
+    }
+}
+
+static inline void lrwait_lock_mutex(lr_sc_mutex_t* const mutex,   uint32_t backoff)
+{
+  while(lrwait_try_lock(mutex))
+    {
+      mempool_wait(backoff);
+    }
+}
+
+static inline void lrwait_unlock_mutex(lr_sc_mutex_t* const mutex)
+{
+  __asm__ __volatile__ ("" : : : "memory");
+  do {
+    load_reserved_wait(mutex);
+  } while(store_conditional_wait(mutex, 0));
   __asm__ __volatile__ ("" : : : "memory");
 }
 
