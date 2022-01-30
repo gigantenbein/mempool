@@ -306,13 +306,13 @@ module lrwait_qnode
 `ifndef VERILATOR
   illegal_transition : assert property(
     @(posedge clk_i) disable iff (~rst_ni) ((state_q == InLRWaitQueue)|=> not (state_q == Idle)))
-    else $warning (1, "Trying to do an illegal transition going from InLRWaitQueue to Idle");
+    else $warning ("Trying to do an illegal transition going from InLRWaitQueue to Idle");
 
   // Assert that SendWakeUp state is eventually left
   leave_send_wakeup : assert property(
     @(posedge clk_i) disable iff (~rst_ni) ((state_q == SendWakeUp)|=>
                                             (state_q == SendWakeUp) || (state_q == Idle)))
-    else $warning (1, "SendWakeUp did not succeed");
+    else $warning ("SendWakeUp did not succeed");
 
   // if qnode is in an idle state, it is not allowed to receive a SCWait
   // A SCWait has to be preceeded by a LRWait
@@ -320,7 +320,7 @@ module lrwait_qnode
     @(posedge clk_i) disable iff (~rst_ni) (((state_q == Idle) &&
                                              (snitch_qvalid_i && tile_qready_i)) |->
                                             ~(amo_op_t'(snitch_qamo_i) == SCWAIT)))
-    else $warning (1, "A SCWait was sent without a preceding LRWait");
+    else $warning ("A SCWait was sent without a preceding LRWait");
 
   // nested LRWaits are disallowed. This includes issuing a reservation again or
   // sending a reservation to another location
@@ -328,7 +328,7 @@ module lrwait_qnode
     @(posedge clk_i) disable iff (~rst_ni) (((state_q == ReadyForSCWait) &&
                                              (snitch_qvalid_i && tile_qready_i)) |->
                                             ~(amo_op_t'(snitch_qamo_i) == LRWAIT)))
-    else $warning (1, "Another LRWait was issued while the previous LRWait was still active.");
+    else $warning ("Another LRWait was issued while the previous LRWait was still active.");
 
   // an SCWait has to go to an address that has been reserved before and no SCWait has occurred so far
   sc_to_valid_address : assert property(
@@ -338,14 +338,14 @@ module lrwait_qnode
                                              (amo_op_t'(snitch_qamo_i) == SCWAIT)))|->
                                             ((next_node_q.addr == snitch_qaddr_i) &&
                                              (next_node_q.valid == 1'b1))))
-    else $warning (1, "The SCWait was not preceeded by a LRWait to the same address.");
+    else $warning ("The SCWait was not preceeded by a LRWait to the same address.");
 
   only_one_sc_per_lr : assert property(
     @(posedge clk_i) disable iff (~rst_ni) (((state_q == InLRWaitQueue) &&
                                              (snitch_qvalid_i && tile_qready_i) &&
                                              (amo_op_t'(snitch_qamo_i) == SCWAIT))|->
                                              !sc_req_arrived_q))
-    else $warning (1, "More than one SCWait was sent for a LRWait");
+    else $warning ("More than one SCWait was sent for a LRWait");
 `endif
   // pragma translate_on
 
