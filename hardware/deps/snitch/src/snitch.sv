@@ -1388,7 +1388,10 @@ module snitch
         riscv_instr::CSR_MINSTRETH: begin
           csr_rvalue = instret_q[63:32];
         end
-        `endif
+        `endif //  `ifdef SNITCH_ENABLE_PERF
+        riscv_instr::CSR_MSCRATCH: begin
+          csr_rvalue = $random();
+        end
         default: begin
           csr_rvalue = '0;
           csr_dump = 1'b1;

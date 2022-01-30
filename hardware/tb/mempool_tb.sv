@@ -261,6 +261,9 @@ module mempool_tb;
     wait (rst_n);
     @(posedge clk);
 
+    // seed RNG
+    void'($random(42));
+
     // Give the cores time to execute the bootrom's program
     #(1000*ClockPeriod);
 
