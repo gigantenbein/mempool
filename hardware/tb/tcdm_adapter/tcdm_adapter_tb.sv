@@ -520,9 +520,21 @@ class Generator;
         endcase // case (random_draw)
       end
       DoSCNext: begin
-        // send store conditional
-        store_conditional(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-        core_status = WaitForResp;
+        random_draw = $urandom_range(1);
+
+        unique case (random_draw)
+          0: begin
+            // send store conditional
+            store_conditional(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+            core_status = WaitForResp;
+          end
+          1: begin
+            write_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+            // do not expect a response from write
+            core_status = DoSCNext;
+          end
+          default: $display("invalid number drawn");
+        endcase // case (random_draw)
       end
       default: begin
         $display("Invalid core status");

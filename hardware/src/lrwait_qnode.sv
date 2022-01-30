@@ -232,7 +232,8 @@ module lrwait_qnode
             end else begin
               state_d = InLRWaitQueue;
             end
-          end else if(tile_pid_i == next_node_q.instruction_id) begin
+          end else if(tile_pid_i == next_node_q.instruction_id
+                      && sc_req_arrived_d == 1'b1) begin
             // it is a SCWaitResp, we can go back to Idle since we are sure
             // that no SCWait update will arrive now until the next LRWait/SCWait
             // cycle
