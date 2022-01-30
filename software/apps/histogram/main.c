@@ -25,6 +25,7 @@
  * MUTEX == 6 LRWait vanilla
  * MUTEX == 7 Software backoff (parametrized)
  * MUTEX == 8 hardware aided backoff (parametrized)
+ * MUTEX == 9 LOAD/STORE without mutex
  */
 
 /*
@@ -39,7 +40,7 @@
  * NBINS: How many bins are accessed?
  */
 
-uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
+volatile uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
 
 #if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
 // amo mutex or LR/SC mutex or LRWait mutex
@@ -148,7 +149,9 @@ int main() {
       bin_value = load_reserved((hist_bins + drawn_number)) + 1;
       sc_result = store_conditional((hist_bins+drawn_number), bin_value);
     } while(sc_result != 0);
-
+#elif MUTEX == 9
+    mempool_wait(BACKOFF);
+    hist_bins[drawn_number] += 1;
 #endif
     hist_iterations++;
     countdown = mempool_get_timer();
