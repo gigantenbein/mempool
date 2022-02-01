@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-// Author: Samuel Riedel, ETH Zurich
+// Author: Marc Gantenbein, ETH Zurich
 
 #include <stdint.h>
 #include <string.h>
@@ -12,95 +12,111 @@
 #include "encoding.h"
 #include "lr_sc_mutex.h"
 #include "mcs_mutex.h"
-#include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
-#include "xpulp/mat_mul.h"
 
-// laziness
-#define MUTEX 0
+/*
+ * MUTEX == 0 LR/SC
+ * MUTEX == 1 amo lock (parametrized)
+ * MUTEX == 2 MCS lock
+ * MUTEX == 3 LRWait MCS (Software based LRWait)
+ * MUTEX == 4 LR/SC lock (parametrized)
+ * MUTEX == 5 LRWait lock (parametrized)
+ * MUTEX == 6 LRWait vanilla
+ * MUTEX == 7 Software backoff (parametrized)
+ * MUTEX == 8 hardware aided backoff (parametrized)
+ * MUTEX == 9 LOAD/STORE without mutex
+ */
+
+/*
+ * BACKOFF: Number of cycles to backoff after failed mutex access
+ */
+
+/*
+ * NBINS: How many bins are accessed?
+ */
+
 
 #define matrix_M 64
 #define matrix_N 32
 #define matrix_P 64
 
-#define vector_N 16*256
+#define NUM_TCDMBANKS NUM_CORES * 4
 
-int32_t vector_a[vector_N] __attribute__((section(".l1_prio")));
-int32_t vector_b[vector_N] __attribute__((section(".l1_prio")));
+#define vector_N NUM_CORES * 4 // NUM_CORES / 4 * NUM_TCDMBANKS_PER_TILE (=16)
 
-void shift_lfsr(uint32_t *lfsr) {
-  *lfsr ^= *lfsr >> 7;
-  *lfsr ^= *lfsr << 9;
-  *lfsr ^= *lfsr >> 13;
-}
+// vector_a has an element in each TCDM bank
+volatile uint32_t vector_a[vector_N] __attribute__((section(".l1_prio")));
+volatile uint32_t vector_b[vector_N] __attribute__((section(".l1_prio")));
 
-uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
+volatile uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
 
-#if MUTEX == 1
-// amo mutex
+#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
+// amo mutex or LR/SC mutex or LRWait mutex
 amo_mutex_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
-#elif MUTEX == 2
-// msc mutex
-mcs_lock_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
-mcs_lock_t* mcs_nodes[NUM_CORES] __attribute__((section(".l1_prio")));
-#elif MUTEX == 3
-// lrwait software
+#elif MUTEX == 2 || MUTEX == 3
+// msc mutex or lrwait_software
 mcs_lock_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
 mcs_lock_t* mcs_nodes[NUM_CORES] __attribute__((section(".l1_prio")));
 #endif
 
-void memory_strider(uint32_t core_id, uint32_t num_cores) {
-  mempool_barrier(num_cores);
-  
-  uint32_t* strider = core_id * 1024;
-  uint32_t ret = 0;
+// indicates if core is active
+volatile uint32_t core_status[NUM_CORES] __attribute__((section(".l1_prio")));
 
+void vector_move_per_tcdm_bank(uint32_t core_id, uint32_t num_cores) {
+
+  // start index where results are written
+  uint32_t start_index = core_id * (vector_N / num_cores);
+  uint32_t end_index   = (core_id + 1) * (vector_N / num_cores);
+
+  mempool_barrier(num_cores);
   mempool_timer_t start_time = mempool_get_timer();
-  for (int i = 0; i < 1024; i++) {
-    // strider
-    // *strider += 1;
-    ret += *strider;
-    strider += 1;
-    mempool_wait(1);
-    if (i % 100 == 0){
-      write_csr(99,i);
-    }
+
+  // hardcode memory accesses such that you do 8 memory accesses to the same TCDM bank
+  // each core uses TCDM banks in another part of mempool, s.t. each core has a unique
+  // region which together cover all TCDM banks
+  for (uint32_t i = 0; i < 2; i += 1) {
+    vector_b[start_index+8*i+0] = *(vector_a + NUM_TCDMBANKS * (0 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+1] = *(vector_a + NUM_TCDMBANKS * (1 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+2] = *(vector_a + NUM_TCDMBANKS * (2 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+3] = *(vector_a + NUM_TCDMBANKS * (3 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+4] = *(vector_a + NUM_TCDMBANKS * (4 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+5] = *(vector_a + NUM_TCDMBANKS * (5 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+6] = *(vector_a + NUM_TCDMBANKS * (6 + 8 * i ) + core_id*16);
+    vector_b[start_index+8*i+7] = *(vector_a + NUM_TCDMBANKS * (7 + 8 * i ) + core_id*16);
   }
 
+  // stop timer
   mempool_timer_t stop_time = mempool_get_timer();
   uint32_t time_diff = stop_time - start_time;
   write_csr(time, time_diff);
+  mempool_barrier(num_cores);
 }
 
-void vector_mult(uint32_t core_id, uint32_t num_cores) {
-  // init vector
+// Move values from consecutive TCDM banks to other vector
+void vector_move_vanilla(uint32_t core_id, uint32_t num_cores) {
 
-  if (core_id == 0) {
-    for (uint32_t i = 0; i < vector_N; i++) {
-      // vector_a[i] = rand_r(&seed);
-      // vector_b[i] = rand_r(&seed);
-      vector_a[i] = i;
-      vector_b[i] = i;
-    }
-  }
+  // start index where results are written
+  uint32_t start_index = core_id * (vector_N / num_cores);
+  uint32_t end_index   = (core_id + 1) * (vector_N / num_cores);
+
   mempool_barrier(num_cores);
-
-  // start time
   mempool_timer_t start_time = mempool_get_timer();
-  
-  for (uint32_t j = 0 ; j < 5 ; j++){
-    for (uint32_t i = 0; i < vector_N; i += 8) {
-      vector_a[i]   += vector_a[i]   * vector_b[i] *   (core_id + 1);
-      vector_a[i+1] += vector_a[i+1] * vector_b[i+1] * (core_id + 1);
-      vector_a[i+2] += vector_a[i+2] * vector_b[i+2] * (core_id + 1);
-      vector_a[i+3] += vector_a[i+3] * vector_b[i+3] * (core_id + 1);
-      vector_a[i+4] += vector_a[i+4] * vector_b[i+4] * (core_id + 1);
-      vector_a[i+5] += vector_a[i+5] * vector_b[i+5] * (core_id + 1);
-      vector_a[i+6] += vector_a[i+6] * vector_b[i+6] * (core_id + 1);
-      vector_a[i+7] += vector_a[i+7] * vector_b[i+7] * (core_id + 1);
-    }
+
+  // hardcode memory accesses such that you do 8 memory accesses to the same TCDM bank
+  // each core uses TCDM banks in another part of mempool, s.t. each core has a unique
+  // region which together cover all TCDM banks
+  for (uint32_t i = 0; i < 2; i += 1) {
+    vector_b[start_index+8*i+0] = *(vector_a + 8*i+0 + core_id*16);
+    vector_b[start_index+8*i+1] = *(vector_a + 8*i+1 + core_id*16);
+    vector_b[start_index+8*i+2] = *(vector_a + 8*i+2 + core_id*16);
+    vector_b[start_index+8*i+3] = *(vector_a + 8*i+3 + core_id*16);
+    vector_b[start_index+8*i+4] = *(vector_a + 8*i+4 + core_id*16);
+    vector_b[start_index+8*i+5] = *(vector_a + 8*i+5 + core_id*16);
+    vector_b[start_index+8*i+6] = *(vector_a + 8*i+6 + core_id*16);
+    vector_b[start_index+8*i+7] = *(vector_a + 8*i+7 + core_id*16);
   }
+
   // stop timer
   mempool_timer_t stop_time = mempool_get_timer();
   uint32_t time_diff = stop_time - start_time;
@@ -114,16 +130,17 @@ int main() {
   // Initialize barrier and synchronize
   mempool_barrier_init(core_id);
 
+  uint32_t random_number = 0;
+  uint32_t drawn_number = 0;
+
   if (core_id == 0){
     // Initialize series of bins and all of them to zero
     for (int i = 0; i<NBINS; i++){
       hist_bins[i] =0;
-      
-#if MUTEX == 1
+      // initialize mutexes
+#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
       hist_locks[i] = amo_allocate_mutex();
-#elif MUTEX == 2
-      hist_locks[i] = initialize_mcs_lock();
-#elif MUTEX == 3
+#elif MUTEX == 2 || MUTEX == 3
       hist_locks[i] = initialize_mcs_lock();
 #endif
     }
@@ -134,61 +151,103 @@ int main() {
 #elif MUTEX == 3
     for (int i = 0; i < NUM_CORES; i++){
       // pass core_id to lock to indicate which node
-      // has to be waken up
+      // has to be woken up
       mcs_nodes[i] = initialize_lrwait_mcs(i);
     }
 #endif
+
+    for (int i = 0; i<NUM_CORES; i++){
+      core_status[i] = 0;
+    }
+
+    // set random cores to active
+    for (int i = 0; i<MATRIXCORES; i++){
+      asm volatile("csrr %0, mscratch" : "=r"(random_number));
+      drawn_number = random_number % NUM_CORES;
+      core_status[drawn_number] = 1;
+      write_csr(92, drawn_number);
+    }
+
   }
+
   mempool_barrier(num_cores);
-  uint32_t drawn_number = 0;
-  uint32_t init_lfsr = core_id * 42 + 1;
-  
-#if MUTEX == 0
-  uint32_t bin_value = 0;
+
+  volatile uint32_t bin_value = 0;
+  uint32_t sc_result = 0;
   uint32_t lr_counter = 0;
-#endif
 
   mempool_barrier(num_cores);
 
-  if (core_id < MATRIXCORES){
-    // Test the Matrix multiplication
-    //    test_matrix_multiplication(matrix_a, matrix_b, matrix_c, matrix_M, matrix_N,
-    //                         matrix_P, core_id, MATRIXCORES);
-    // memory_strider(core_id, MATRIXCORES);
-    vector_mult(core_id, MATRIXCORES);
-  } else {
-    while(1) {
-      if(!OTHER_CORE_IDLE) {
-        // needs seed as pointer
-        shift_lfsr(&init_lfsr);
+  if (core_status[core_id]){
 
-        drawn_number = init_lfsr % NBINS;
-#if MUTEX == 1
-        amo_lock_mutex(hist_locks[drawn_number]);
+    // wait for other cores to start histogram application
+    vector_move_vanilla(core_id, MATRIXCORES);
+  } else {
+
+    // Polling access of Pollers
+    while(1) {
+      if(!OTHERCOREIDLE) {
+        // polling access
+        asm volatile("csrr %0, mscratch" : "=r"(random_number));
+        drawn_number = random_number % NBINS;
+#if MUTEX == 0
+        // Vanilla LR/SC
+        do {
+          bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+        } while(store_conditional((hist_bins+drawn_number), bin_value));
+#elif MUTEX == 1
+        // Amo lock
+        amo_lock_mutex(hist_locks[drawn_number], BACKOFF);
         hist_bins[drawn_number] += 1;
         amo_unlock_mutex(hist_locks[drawn_number]);
 #elif MUTEX == 2
-        lock_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
+        // MCS lock
+        lock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
         hist_bins[drawn_number] += 1;
-        unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
+        unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
 #elif MUTEX == 3
+        // LRWait MCS/Software based LRWait
         lrwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
         hist_bins[drawn_number] += 1;
-        lrwait_wakeup_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
-#else
+        lrwait_wakeup_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
+#elif MUTEX == 4
+        // LR/SC lock
+        lr_sc_lock_mutex(hist_locks[drawn_number], BACKOFF);
+        hist_bins[drawn_number] += 1;
+        lr_sc_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 5
+        // LRWait lock
+        lrwait_lock_mutex(hist_locks[drawn_number], BACKOFF);
+        hist_bins[drawn_number] += 1;
+        lrwait_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 6
+        // LRWait vanilla
         do {
+          bin_value = load_reserved_wait((hist_bins + core_id)) + 1;
+        } while(store_conditional_wait((hist_bins + core_id), bin_value));
+#elif MUTEX == 7
+        // LR/SC with BACKOFF
+        do {
+          mempool_wait(BACKOFF);
           bin_value = load_reserved((hist_bins + drawn_number)) + 1;
-          lr_counter += 1;
         } while(store_conditional((hist_bins+drawn_number), bin_value));
+#elif MUTEX == 8
+        // LRBackoff
+        do {
+          mempool_wait(sc_result*BACKOFF);
+          bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+          sc_result = store_conditional((hist_bins+drawn_number), bin_value);
+        } while(sc_result != 0);
+#elif MUTEX == 9
+        mempool_wait(BACKOFF);
+        hist_bins[drawn_number] += 1;
 #endif
+
       } else {
         mempool_wait(100);
       }
     }
   }
-    
-  // wait until all cores have finished
-  mempool_barrier(MATRIXCORES);
 
   return 0;
 }
