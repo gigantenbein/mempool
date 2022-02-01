@@ -132,23 +132,27 @@ int main() {
     lrwait_unlock_mutex(hist_locks[drawn_number]);
 #elif MUTEX == 6
     // LRWait vanilla
-    do {
+    bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
+    while(store_conditional_wait((hist_bins+drawn_number), bin_value)) {
       mempool_wait(BACKOFF);
       bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
-    } while(store_conditional_wait((hist_bins+drawn_number), bin_value));
+    }
 #elif MUTEX == 7
     // LR/SC with BACKOFF
-    do {
+    bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+    while(store_conditional((hist_bins+drawn_number), bin_value)) {
       mempool_wait(BACKOFF);
       bin_value = load_reserved((hist_bins + drawn_number)) + 1;
-    } while(store_conditional((hist_bins+drawn_number), bin_value));
+    }
 #elif MUTEX == 8
     // LRBackoff
-    do {
+    bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+    sc_result = store_conditional((hist_bins+drawn_number), bin_value);
+    while(sc_result != 0) {
       mempool_wait(sc_result*BACKOFF);
       bin_value = load_reserved((hist_bins + drawn_number)) + 1;
       sc_result = store_conditional((hist_bins+drawn_number), bin_value);
-    } while(sc_result != 0);
+    }
 #elif MUTEX == 9
     mempool_wait(BACKOFF);
     hist_bins[drawn_number] += 1;
