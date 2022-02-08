@@ -70,6 +70,7 @@ volatile uint32_t core_status[NUM_CORES] __attribute__((section(".l1_prio")));
 
 // if this flag == MATRIXCORES, all workers are finished with their task
 volatile uint32_t finished_flag __attribute__((section(".l1_prio")));
+volatile uint32_t num_active_cores __attribute__((section(".l1_prio")));
 
 void vector_move_per_tcdm_bank(uint32_t core_id, uint32_t num_cores) {
 
@@ -83,7 +84,7 @@ void vector_move_per_tcdm_bank(uint32_t core_id, uint32_t num_cores) {
   // hardcode memory accesses such that you do 8 memory accesses to the same TCDM bank
   // each core uses TCDM banks in another part of mempool, s.t. each core has a unique
   // region which together cover all TCDM banks
-  for (uint32_t i = 0; i < 2; i += 1) {
+  for (uint32_t i = 0; i < 20; i += 1) {
     vector_b[start_index+8*i+0] = *(vector_a + NUM_TCDMBANKS * (0 + 8 * i ) + core_id*16);
     vector_b[start_index+8*i+1] = *(vector_a + NUM_TCDMBANKS * (1 + 8 * i ) + core_id*16);
     vector_b[start_index+8*i+2] = *(vector_a + NUM_TCDMBANKS * (2 + 8 * i ) + core_id*16);
@@ -160,11 +161,9 @@ int main() {
   uint32_t drawn_number = 0;
 
   if (core_id == 0){
-
-
     for (int i = 0; i<NBINS; i++){
       asm volatile("csrr %0, mscratch" : "=r"(random_number));
-      drawn_number = random_number % NUM_CORES;
+      drawn_number = random_number % vector_N;
       hist_indices[i] = drawn_number;
       write_csr(93, drawn_number);
       hist_bins[drawn_number] = 0;
@@ -194,10 +193,19 @@ int main() {
 
     // set random cores to active
     for (int i = 0; i<MATRIXCORES; i++){
-      asm volatile("csrr %0, mscratch" : "=r"(random_number));
-      drawn_number = random_number % NUM_CORES;
+      // make sure every core is distinct, i.e. no collision
+      do {
+        asm volatile("csrr %0, mscratch" : "=r"(random_number));
+        drawn_number = random_number % NUM_CORES;
+      } while(core_status[drawn_number] == 1);
+
       core_status[drawn_number] = 1;
       write_csr(92, drawn_number);
+    }
+    // get number of active cores
+    num_active_cores = 0;
+    for (int i = 0; i < NUM_CORES; i++) {
+      num_active_cores += core_status[i];
     }
     finished_flag = 0;
   }
@@ -210,15 +218,16 @@ int main() {
 
   mempool_barrier(num_cores);
 
-  // if (core_status[core_id]){
-  if (core_id < MATRIXCORES) {
+
+  if (core_status[core_id]){
+  // if (core_id < MATRIXCORES) {
     // wait for other cores to start histogram application
     // vector_move_per_tcdm_bank(core_id, MATRIXCORES);
 
-    vector_move_vanilla(core_id, MATRIXCORES);
+    vector_move_vanilla(core_id, num_active_cores);
     // primitive barrier to wait for all workers to finish
     amo_add(&finished_flag, 1);
-    while(finished_flag < MATRIXCORES) {
+    while(finished_flag < num_active_cores) {
       mempool_wait(100);
     }
   } else {
