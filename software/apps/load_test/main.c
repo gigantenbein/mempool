@@ -37,9 +37,9 @@
  * NBINS: How many bins are accessed?
  */
 
-#define NUM_TCDMBANKS NUM_CORES * 4
+#define NUM_TCDMBANKS (NUM_CORES * 4)
 
-#define vector_N NUM_CORES * 4 // NUM_CORES / 4 * NUM_TCDMBANKS_PER_TILE (=16)
+#define vector_N (NUM_CORES * 4) // NUM_CORES / 4 * NUM_TCDMBANKS_PER_TILE (=16)
 
 // vector_a has an element in each TCDM bank
 volatile uint32_t vector_a[vector_N] __attribute__((section(".l1_prio")));
