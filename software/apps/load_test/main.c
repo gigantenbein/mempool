@@ -16,16 +16,17 @@
 #include "synchronization.h"
 
 /*
- * MUTEX == 0 LR/SC
- * MUTEX == 1 amo lock (parametrized)
- * MUTEX == 2 MCS lock
- * MUTEX == 3 LRWait MCS (Software based LRWait)
- * MUTEX == 4 LR/SC lock (parametrized)
- * MUTEX == 5 LRWait lock (parametrized)
- * MUTEX == 6 LRWait vanilla
- * MUTEX == 7 Software backoff (parametrized)
- * MUTEX == 8 hardware aided backoff (parametrized)
- * MUTEX == 9 LOAD/STORE without mutex
+ * MUTEX == 0  LR/SC
+ * MUTEX == 1  amo lock (parametrized)
+ * MUTEX == 2  MCS lock
+ * MUTEX == 3  LRWait MCS (Software based LRWait)
+ * MUTEX == 4  LR/SC lock (parametrized)
+ * MUTEX == 5  LRWait lock (parametrized)
+ * MUTEX == 6  LRWait vanilla
+ * MUTEX == 7  Software backoff (parametrized)
+ * MUTEX == 8  hardware aided backoff (parametrized)
+ * MUTEX == 9  LOAD/STORE without mutex
+ * MUTEX == 10 idle pollers (no activity)
  */
 
 /*
@@ -218,89 +219,89 @@ int main() {
 
   mempool_barrier(num_cores);
 
-
   if (core_status[core_id]){
-  // if (core_id < MATRIXCORES) {
     // wait for other cores to start histogram application
-    // vector_move_per_tcdm_bank(core_id, MATRIXCORES);
+    mempool_wait(100);
 
+    // start working task
     vector_move_vanilla(core_id, num_active_cores);
+
     // primitive barrier to wait for all workers to finish
     amo_add(&finished_flag, 1);
     while(finished_flag < num_active_cores) {
       mempool_wait(100);
     }
   } else {
-
     // Polling access of Pollers
     while(1) {
-      if(!OTHERCOREIDLE) {
-        // polling access
-        asm volatile("csrr %0, mscratch" : "=r"(random_number));
-        drawn_number = random_number % NBINS;
-        // pick index that assigns a random bin to drawn number
-        drawn_number = hist_indices[drawn_number];
+      // polling access
+#if MUTEX != 10
+      asm volatile("csrr %0, mscratch" : "=r"(random_number));
+      drawn_number = random_number % NBINS;
+      // pick index that assigns a random bin to drawn number
+      drawn_number = hist_indices[drawn_number];
+#endif
 
 #if MUTEX == 0
-        // Vanilla LR/SC
-        do {
-          bin_value = load_reserved((hist_bins + drawn_number)) + 1;
-        } while(store_conditional((hist_bins+drawn_number), bin_value));
-#elif MUTEX == 1
-        // Amo lock
-        amo_lock_mutex(hist_locks[drawn_number], BACKOFF);
-        hist_bins[drawn_number] += 1;
-        amo_unlock_mutex(hist_locks[drawn_number]);
-#elif MUTEX == 2
-        // MCS lock
-        lock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
-        hist_bins[drawn_number] += 1;
-        unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
-#elif MUTEX == 3
-        // LRWait MCS/Software based LRWait
-        lrwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
-        hist_bins[drawn_number] += 1;
-        lrwait_wakeup_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
-#elif MUTEX == 4
-        // LR/SC lock
-        lr_sc_lock_mutex(hist_locks[drawn_number], BACKOFF);
-        hist_bins[drawn_number] += 1;
-        lr_sc_unlock_mutex(hist_locks[drawn_number]);
-#elif MUTEX == 5
-        // LRWait lock
-        lrwait_lock_mutex(hist_locks[drawn_number], BACKOFF);
-        hist_bins[drawn_number] += 1;
-        lrwait_unlock_mutex(hist_locks[drawn_number]);
-#elif MUTEX == 6
-        // LRWait vanilla
-        bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
-        while(store_conditional_wait((hist_bins+drawn_number), bin_value)) {
-          mempool_wait(BACKOFF);
-          bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
-        }
-#elif MUTEX == 7
-        // LR/SC with BACKOFF
+      // Vanilla LR/SC
+      do {
         bin_value = load_reserved((hist_bins + drawn_number)) + 1;
-        while(store_conditional((hist_bins+drawn_number), bin_value)) {
-          mempool_wait(BACKOFF);
-          bin_value = load_reserved((hist_bins + drawn_number)) + 1;
-        }
+      } while(store_conditional((hist_bins+drawn_number), bin_value));
+#elif MUTEX == 1
+      // Amo lock
+      amo_lock_mutex(hist_locks[drawn_number], BACKOFF);
+      hist_bins[drawn_number] += 1;
+      amo_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 2
+      // MCS lock
+      lock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
+      hist_bins[drawn_number] += 1;
+      unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
+#elif MUTEX == 3
+      // LRWait MCS/Software based LRWait
+      lrwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
+      hist_bins[drawn_number] += 1;
+      lrwait_wakeup_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
+#elif MUTEX == 4
+      // LR/SC lock
+      lr_sc_lock_mutex(hist_locks[drawn_number], BACKOFF);
+      hist_bins[drawn_number] += 1;
+      lr_sc_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 5
+      // LRWait lock
+      lrwait_lock_mutex(hist_locks[drawn_number], BACKOFF);
+      hist_bins[drawn_number] += 1;
+      lrwait_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 6
+      // LRWait vanilla
+      bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
+      while(store_conditional_wait((hist_bins+drawn_number), bin_value)) {
+        mempool_wait(BACKOFF);
+        bin_value = load_reserved_wait((hist_bins + drawn_number)) + 1;
+      }
+#elif MUTEX == 7
+      // LR/SC with BACKOFF
+      bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+      while(store_conditional((hist_bins+drawn_number), bin_value)) {
+        mempool_wait(BACKOFF);
+        bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+      }
 #elif MUTEX == 8
-        // LRBackoff
+      // LRBackoff
+      bin_value = load_reserved((hist_bins + drawn_number)) + 1;
+      sc_result = store_conditional((hist_bins+drawn_number), bin_value);
+      while(sc_result != 0) {
+        mempool_wait(sc_result*BACKOFF);
         bin_value = load_reserved((hist_bins + drawn_number)) + 1;
         sc_result = store_conditional((hist_bins+drawn_number), bin_value);
-        while(sc_result != 0) {
-          mempool_wait(sc_result*BACKOFF);
-          bin_value = load_reserved((hist_bins + drawn_number)) + 1;
-          sc_result = store_conditional((hist_bins+drawn_number), bin_value);
-        }
-#elif MUTEX == 9
-        // mempool_wait(BACKOFF);
-        hist_bins[drawn_number] += 1;
-#endif
-      } else {
-        mempool_wait(1000);
       }
+#elif MUTEX == 9
+      // mempool_wait(BACKOFF);
+      hist_bins[drawn_number] += 1;
+#elif MUTEX == 10
+      // idling
+      mempool_wait(1000);
+#endif
     }
   }
 
