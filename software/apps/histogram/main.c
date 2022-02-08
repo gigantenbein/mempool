@@ -39,8 +39,13 @@
 /*
  * NBINS: How many bins are accessed?
  */
+#define vector_N (NUM_CORES * 4) // NUM_CORES / 4 * NUM_TCDMBANKS_PER_TILE (=16)
 
-volatile uint32_t hist_bins[NBINS] __attribute__((section(".l1_prio")));
+// allocate bins accross all TCDM banks
+volatile uint32_t hist_bins[vector_N] __attribute__((section(".l1_prio")));
+
+// pick random indices for the histogram bins
+volatile uint32_t hist_indices[NBINS] __attribute__((section(".l1_prio")));
 
 #if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
 // amo mutex or LR/SC mutex or LRWait mutex
@@ -57,14 +62,34 @@ int main() {
   // Initialize synchronization variables
   mempool_barrier_init(core_id);
 
+  uint32_t drawn_number = 0;
+  uint32_t random_number = 0;
+
   // initializes the heap allocator
   mempool_init(core_id, num_cores);
 
   if (core_id == 0){
     // Initialize series of bins and all of them to zero
-    for (int i = 0; i<NBINS; i++){
-      hist_bins[i] =0;
+    for (uint32_t i = 0; i < vector_N; i++) {
+      hist_bins[i] = 0;
+    }
 
+    if (NBINS > vector_N) {
+      // make sure we have enough spots for our bins
+      return -1;
+    }
+
+    for (int i = 0; i<NBINS; i++){
+      // generate unique random histogram bins
+      do {
+        asm volatile("csrr %0, mscratch" : "=r"(random_number));
+        drawn_number = random_number % vector_N;
+      } while(hist_bins[drawn_number] == 1);
+      write_csr(93, drawn_number);
+      hist_bins[drawn_number] = 1;
+      hist_indices[i] = drawn_number;
+
+      // initalize mutexes
 #if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
       hist_locks[i] = amo_allocate_mutex();
 #elif MUTEX == 2 || MUTEX == 3
@@ -86,11 +111,9 @@ int main() {
   }
 
   mempool_barrier(num_cores);
-  uint32_t drawn_number = 0;
 
   uint32_t bin_value = 0;
   uint32_t hist_iterations = 0;
-  uint32_t random_number = 0;
   uint32_t sc_result = 0;
   mempool_timer_t countdown = 0;
 
@@ -100,6 +123,9 @@ int main() {
   while(countdown < NUMCYCLES + start_time) {
     asm volatile("csrr %0, mscratch" : "=r"(random_number));
     drawn_number = random_number % NBINS;
+
+    // pick index that assigns a random bin to drawn number
+    drawn_number = hist_indices[drawn_number];
 #if MUTEX == 0
     // Vanilla LR/SC
     do {
@@ -167,7 +193,7 @@ int main() {
 
   if(core_id == 0) {
     uint32_t sum = 0;
-    for (uint32_t i = 0; i<NBINS; i++){
+    for (uint32_t i = 0; i<vector_N; i++){
       sum += *(hist_bins+i);
     }
     write_csr(90, sum);
