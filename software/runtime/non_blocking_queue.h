@@ -21,9 +21,9 @@
 
 #include "alloc.h"
 
-#if MUTEX == 0
+#if MUTEX == 0 || MUTEX == 4 ||  MUTEX == 7 || MUTEX == 8
 #include "lr_sc_mutex.h"
-#elif MUTEX == 1
+#elif MUTEX == 5 || MUTEX == 6
 #include "lrwait_mutex.h"
 #endif
 
@@ -87,121 +87,6 @@ int uninitialize_queue(non_blocking_queue_t* queue)
   simple_free(queue);
 
   return 0;
-}
-
-//
-// Add a new value to an existing queue.
-int32_t enqueue(non_blocking_queue_t* const queue, non_blocking_node_t volatile* new_node) {
-  non_blocking_node_t volatile* tail;
-  non_blocking_node_t volatile* next;
-  new_node->next = NULL;
-
-  // Add node to queue
-  while(1) {
-    tail = queue->tail;
-    next = (non_blocking_node_t*) load_reserved(&tail->next);
-
-    // Check if next is really the last node
-    if (tail != queue->tail) {
-      store_conditional(&tail->next, (uint32_t) next);
-      continue;
-    }
-    if (next == NULL) {
-      if (!store_conditional(&tail->next, (uint32_t) new_node)) {
-        // node successfully inserted
-        break;
-      }
-      else {
-        // Other core broke reservation
-        continue;
-      }
-    }
-    // Tail did not point to the last node --> update tail pointer
-    else {
-      store_conditional(&tail->next, (uint32_t) next);
-
-      tail = (non_blocking_node_t*) load_reserved(&queue->tail);
-      next = tail->next;
-
-      if (next != NULL) {
-        store_conditional(&queue->tail, (uint32_t) next);
-      }
-      else {
-        store_conditional(&queue->tail, (uint32_t) tail);
-      }
-    }
-  }
-
-  // Update the tail node
-  tail = (non_blocking_node_t*) load_reserved(&queue->tail);
-  next = tail->next;
-  // give up reservation before leaving
-  if (next != NULL) {
-    store_conditional(&queue->tail, (unsigned) next);
-  }
-  else{
-    store_conditional(&queue->tail, (uint32_t) tail);
-  }
-
-  return 0;
-}
-
-//
-// Read head of the queue and remove node.
-non_blocking_node_t volatile* dequeue(non_blocking_queue_t* const queue)
-{
-  // Variables used as buffer
-  volatile uint32_t value = -1;
-  non_blocking_node_t volatile* head;
-  non_blocking_node_t volatile* tail;
-  non_blocking_node_t volatile* next;
-  while (1) {
-    head = (non_blocking_node_t*) load_reserved(&queue->head);
-    tail = queue->tail;
-    __asm__ __volatile__ ("" : : : "memory");
-    next = head->next;
-    if (head != queue->head) {
-      // write_csr(95,888888);
-      store_conditional(&queue->head, (uint32_t) head);
-      continue; // CHECK Necessary?
-    }
-    if (head == tail) {
-      store_conditional(&queue->head, (uint32_t) head);
-      // Queue empty or tail falling behind
-      if (next == NULL) {
-        return NULL;
-      }
-      // Help updating tail
-      tail = (non_blocking_node_t*) load_reserved(&queue->tail);
-      next = tail->next;
-      if (next != NULL){
-        if(!store_conditional(&queue->tail, (uint32_t) next)){
-          return NULL;
-        }
-        else{
-          // write_csr(trace,6);
-        }
-      }
-      store_conditional(&queue->tail, (uint32_t) tail);
-    }
-    else {
-      // Queue is not empty
-      // value = next->value;
-
-      if (!store_conditional(&queue->head, (uint32_t) next)) {
-        value = next->value;
-        break;
-      }
-      else {
-        continue;
-      }
-    }
-  }
-  // Free the nodes memory
-  __asm__ __volatile__ ("" : : : "memory");
-  head->next = NULL;
-  head->value = value;
-  return head;
 }
 
 // CAS version taken from Michael, Maged M. and Scott, Michael L.
