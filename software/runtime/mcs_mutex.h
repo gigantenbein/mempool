@@ -9,7 +9,6 @@
 
 #include "alloc.h"
 #include "amo_mutex.h"
-#include "lr_sc_mutex.h"
 #include "runtime.h"
 
 typedef struct mcs_lock_t mcs_lock_t;
