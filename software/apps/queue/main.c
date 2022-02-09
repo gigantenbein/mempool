@@ -12,14 +12,13 @@
 #include "runtime.h"
 #include "synchronization.h"
 
-#define QUEUE 1
-
 #include "non_blocking_queue.h"
 
-#define NUMBER_OF_NODES 16
+#define NUMBER_OF_NODES 256
 
-non_blocking_queue_t *queue;
-non_blocking_node_t* nodes[NUMBER_OF_NODES];
+non_blocking_queue_t queue __attribute__((section(".l1_prio")));
+non_blocking_node_t nodes[NUMBER_OF_NODES] __attribute__((section(".l1_prio")));
+non_blocking_node_t dummy_node __attribute__((section(".l1_prio")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -30,68 +29,35 @@ int main() {
   // initializes the heap allocator
   mempool_init(core_id, num_cores);
 
+  // statically allocate queue
   if (core_id == 0) {
-    printf("queue initializing\n");
-    queue = initialize_queue();
-    if (queue == NULL) {
-      printf("queue initialization failed\n");
-      return 1;
-    }
+    dummy_node.next = NULL;
+    dummy_node.value = 0;
+    queue.head = &dummy_node;
+    queue.tail = &dummy_node;
   }
 
-  // alloc space for nodes with values from 1 to 16
+  // initialize nodes to enqueue
   if(core_id == 0){
-    for (int i; i<NUMBER_OF_NODES; i++){
-      *(nodes+i) = domain_malloc(get_alloc_l1(), sizeof(non_blocking_node_t));
-      if (*(nodes+i) == NULL) return -1;
-      nodes[i]->next = NULL;
-      nodes[i]->value = i;
+    for (uint32_t i = 0; i<NUMBER_OF_NODES; i++){
+      nodes[i].next = NULL;
+      nodes[i].value = i;
+    }
+  }
+  non_blocking_node_t* temp;
+
+  mempool_barrier(num_cores);
+
+  if (core_id < NUMBER_OF_NODES) {
+    cas_enqueue(&queue, (nodes+core_id));
+    temp = cas_dequeue(&queue);
+    for (int i = 0; i < 2; i++) {
+      cas_enqueue(&queue, temp);
+      write_csr(93, temp->value);
+      temp = cas_dequeue(&queue);
     }
   }
 
-  mempool_barrier(num_cores);
-  if (core_id == 0) {
-    enqueue(queue,nodes[0]);
-    enqueue(queue,nodes[1]);
-    enqueue(queue,nodes[2]);
-    enqueue(queue,nodes[3]);
-    enqueue(queue,nodes[4]);
-    enqueue(queue,nodes[5]);
-    enqueue(queue,nodes[6]);
-    enqueue(queue,nodes[7]);
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-
-  } else if (core_id == 1) {
-    enqueue(queue,nodes[8]);
-    enqueue(queue,nodes[9]);
-    enqueue(queue,nodes[10]);
-    enqueue(queue,nodes[11]);
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    enqueue(queue,nodes[12]);
-    enqueue(queue,nodes[13]);
-    enqueue(queue,nodes[14]);
-    enqueue(queue,nodes[15]);
-  }
-
-  mempool_barrier(num_cores);
-  if (core_id == 1) {
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-    printf("dequeue %3d \n", dequeue(queue));
-  }
-
-  // wait until all cores have finished
   mempool_barrier(num_cores);
 
   return 0;

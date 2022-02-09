@@ -30,7 +30,7 @@ typedef struct non_blocking_node_t     non_blocking_node_t;
 typedef struct non_blocking_queue_t    non_blocking_queue_t;
 
 struct non_blocking_node_t {
-  int value;
+  uint32_t value;
   non_blocking_node_t* volatile next;
 };
 
@@ -48,12 +48,12 @@ non_blocking_queue_t* initialize_queue()
 {
 
   // Allocate memory
-  non_blocking_queue_t *const queue = (non_blocking_queue_t *)domain_malloc(get_alloc_l1(), 4 * 4);
-  non_blocking_node_t *const node = domain_malloc(get_alloc_l1(), sizeof(non_blocking_node_t));
+  non_blocking_queue_t* const queue = (non_blocking_queue_t *)domain_malloc(get_alloc_l1(), sizeof(non_blocking_queue_t));
+  non_blocking_node_t* node = (non_blocking_node_t *)domain_malloc(get_alloc_l1(), sizeof(non_blocking_node_t));
   // Check if memory allocations were successful
   if (queue == NULL || node == NULL) return NULL;
   // Set initial values
-  node->value = -1;
+  node->value = 0;
   node->next  = NULL;
   queue->head = node;
   queue->tail = node;
@@ -85,77 +85,49 @@ int uninitialize_queue(non_blocking_queue_t* queue)
   return 0;
 }
 
-void print_queue(non_blocking_queue_t* const queue) {
-  printf("Head %3d \n", queue->head->value);
-  printf("Tail %3d \n", queue->tail->value);
-
-  non_blocking_node_t volatile* current_node;
-  current_node = queue->head->next;
-  printf("Node %3d\n",current_node->value);
-  if (current_node->next == current_node->next->next){
-    printf("Node %3d\n",current_node->next->value);
-    printf("Node %3d\n",current_node->next->next->value);
-  }
-
-  while(current_node != NULL){
-    printf("Node %3d\n",current_node->value);
-    current_node = current_node->next;
-  }
-
-}
 //
 // Add a new value to an existing queue.
-//
-// @param   queue       A pointer to the queue to add the value to.
-// @param   value       Value to be added to the queue.
-//
-// @return  Zero on success, -1 if allocation of new node failed.
-//
-int enqueue(non_blocking_queue_t* const queue, non_blocking_node_t* new_node)
-{
+int32_t enqueue(non_blocking_queue_t* const queue, non_blocking_node_t volatile* new_node) {
   non_blocking_node_t volatile* tail;
   non_blocking_node_t volatile* next;
+  new_node->next = NULL;
 
   // Add node to queue
-  while(1)
-    {
-      tail = queue->tail;
-      next = (non_blocking_node_t*) load_reserved(&tail->next);
-      // Check if next is really the last node
-      if (tail != queue->tail){
-        store_conditional(&tail->next, (unsigned) next);
+  while(1) {
+    tail = queue->tail;
+    next = (non_blocking_node_t*) load_reserved(&tail->next);
+
+    // Check if next is really the last node
+    if (tail != queue->tail) {
+      store_conditional(&tail->next, (uint32_t) next);
+      continue;
+    }
+    if (next == NULL) {
+      if (!store_conditional(&tail->next, (uint32_t) new_node)) {
+        // node successfully inserted
+        break;
+      }
+      else {
+        // Other core broke reservation
         continue;
       }
-      if (next == NULL)
-        {
-          if (!store_conditional(&tail->next, (unsigned) new_node))
-            {
-              // node successfully inserted
-              break;
-            }
-          else
-            {
-              // Other core broke reservation
-              continue;
-            }
-        }
-      // Tail did not point to the last node --> update tail pointer
-      else
-        {
-          store_conditional(&tail->next, (unsigned) next);
-
-          tail = (non_blocking_node_t*) load_reserved(&queue->tail);
-          next = tail->next;
-
-          if (next != NULL) {
-            store_conditional(&queue->tail, (unsigned) next);
-          }
-          else{
-            store_conditional(&queue->tail, (uint32_t) tail);
-          }
-
-        }
     }
+    // Tail did not point to the last node --> update tail pointer
+    else {
+      store_conditional(&tail->next, (uint32_t) next);
+
+      tail = (non_blocking_node_t*) load_reserved(&queue->tail);
+      next = tail->next;
+
+      if (next != NULL) {
+        store_conditional(&queue->tail, (uint32_t) next);
+      }
+      else {
+        store_conditional(&queue->tail, (uint32_t) tail);
+      }
+    }
+  }
+
   // Update the tail node
   tail = (non_blocking_node_t*) load_reserved(&queue->tail);
   next = tail->next;
@@ -168,71 +140,130 @@ int enqueue(non_blocking_queue_t* const queue, non_blocking_node_t* new_node)
   }
 
   return 0;
-
 }
 
 //
 // Read head of the queue and remove node.
-//
-// @param   queue       A pointer to the queue to read.
-//
-// @return  Value of queue. -1 if the queue was empty.
-//
-int dequeue(non_blocking_queue_t* const queue)
+non_blocking_node_t volatile* dequeue(non_blocking_queue_t* const queue)
 {
   // Variables used as buffer
-  int value = -1;
+  volatile uint32_t value = -1;
   non_blocking_node_t volatile* head;
   non_blocking_node_t volatile* tail;
   non_blocking_node_t volatile* next;
-  while (1)
-    {
-      head = (non_blocking_node_t*) load_reserved(&queue->head);
-      tail = queue->tail;
-      __asm__ __volatile__ ("" : : : "memory");
-      next = head->next;
-      if (head != queue->head) continue; // CHECK Necessary?
-      if (head == tail)
-        {
-          write_csr(trace,1);
-          // Queue empty or tail falling behind
-          if (next == NULL)
-            {
-              return -1;
-            }
-          // Help updating tail
-          tail = (non_blocking_node_t*) load_reserved(&queue->tail);
-          next = tail->next;
-          if (next != NULL){
-            write_csr(trace,5);
-
-            if(!store_conditional(&queue->tail, (uint32_t) next)){
-              return -1;
-            }
-            else{
-              write_csr(trace,6);
-            }
-          }
-        }
-      else
-        {
-          // Queue is not empty
-          value = next->value;
-          write_csr(trace,2);
-          if (!store_conditional(&queue->head, (uint32_t) next))
-            {
-                                  write_csr(trace,3);
-              break;
-            }
-          else
-            {                    write_csr(trace,4);
-              continue;
-            }
-        }
+  while (1) {
+    head = (non_blocking_node_t*) load_reserved(&queue->head);
+    tail = queue->tail;
+    __asm__ __volatile__ ("" : : : "memory");
+    next = head->next;
+    if (head != queue->head) {
+      // write_csr(95,888888);
+      store_conditional(&queue->head, (uint32_t) head);
+      continue; // CHECK Necessary?
     }
+    if (head == tail) {
+      store_conditional(&queue->head, (uint32_t) head);
+      // Queue empty or tail falling behind
+      if (next == NULL) {
+        return NULL;
+      }
+      // Help updating tail
+      tail = (non_blocking_node_t*) load_reserved(&queue->tail);
+      next = tail->next;
+      if (next != NULL){
+        if(!store_conditional(&queue->tail, (uint32_t) next)){
+          return NULL;
+        }
+        else{
+          // write_csr(trace,6);
+        }
+      }
+      store_conditional(&queue->tail, (uint32_t) tail);
+    }
+    else {
+      // Queue is not empty
+      // value = next->value;
+
+      if (!store_conditional(&queue->head, (uint32_t) next)) {
+        value = next->value;
+        break;
+      }
+      else {
+        continue;
+      }
+    }
+  }
   // Free the nodes memory
-  simple_free((void*) head);
-  return value;
+  __asm__ __volatile__ ("" : : : "memory");
+  head->next = NULL;
+  head->value = value;
+  return head;
+}
+
+// CAS version taken from Michael, Maged M. and Scott, Michael L.
+// Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms
+
+//
+// Add a new value to an existing queue.
+int32_t cas_enqueue(non_blocking_queue_t* queue, non_blocking_node_t* volatile new_node) {
+  non_blocking_node_t volatile* tail;
+  non_blocking_node_t volatile* next;
+  new_node->next = NULL;
+
+  // Add node to queue
+  while(1) {
+    tail = queue->tail;
+    next = tail->next;
+
+    // Check if next is really the last node
+    if (tail == queue->tail) {
+      if (next == NULL) {
+        if (compare_and_swap(&tail->next, (uint32_t)next, (uint32_t)new_node) == 0) {
+          break;
+        }
+      } else {
+        compare_and_swap(&queue->tail, (uint32_t)tail, (uint32_t)next);
+      }
+    }
+  }
+
+  compare_and_swap(&queue->tail, (uint32_t)tail, (uint32_t)new_node);
+  return 0;
+}
+
+//
+// Read head of the queue and remove node.
+non_blocking_node_t volatile* cas_dequeue(non_blocking_queue_t* queue)
+{
+  // Variables used as buffer
+  volatile uint32_t value = 0;
+  non_blocking_node_t volatile* head;
+  non_blocking_node_t volatile* tail;
+  non_blocking_node_t volatile* next;
+  while (1) {
+    head = queue->head;
+    tail = queue->tail;
+    next = head->next;
+    if (head == queue->head) {
+      if (head == tail) {
+        if (next == NULL) {
+          return NULL;
+        }
+        compare_and_swap(&queue->tail, (uint32_t)tail, (uint32_t)next);
+      } else {
+        value = next->value;
+        if(compare_and_swap(&queue->head, (uint32_t)head, (uint32_t)next) == 0) {
+          break;
+        }
+      }
+    }
+  }
+  // Free the nodes memory
+  // simple_free((void*) head);
+  __asm__ __volatile__ ("" : : : "memory");
+  head->next = NULL;
+  head->value = value;
+  return head;
 }
 
 #endif
