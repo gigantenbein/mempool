@@ -394,7 +394,10 @@ module tcdm_adapter #(
         scwait_active_d = 1'b0;
 
         if (addr_match) begin
-          if (in_meta_o == lrwait_reservation_q[node_idx].head) begin
+          // make sure we only match on metadata identifying core
+          if ((in_meta_o.ini_addr == lrwait_reservation_q[node_idx].head.ini_addr) &&
+              (in_meta_o.tile_id  == lrwait_reservation_q[node_idx].head.tile_id) &&
+              (in_meta_o.core_id  == lrwait_reservation_q[node_idx].head.core_id)) begin
             // if head is invalid, a write or amo invalidated reservation
             if (lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
 

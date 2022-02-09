@@ -315,6 +315,9 @@ module tcdm_adapter_tb;
       // core_id is meta data without remote/local tile bit
       // and without lrwait bit
       abs_core_id = meta[MetaWidth-2:1];
+      abs_core_id[1:0] = meta.core_id;
+      abs_core_id[5:2] = meta.tile_id;
+      abs_core_id[7:6] = meta.ini_addr;
     end // else: !if(meta.ini_addr[IniAddrWidth-1] == 1'b0)
 
     return abs_core_id;
@@ -327,6 +330,8 @@ module tcdm_adapter_tb;
 
 
   function bank_metadata_t get_metadata_from_core_id(input int abs_core_id);
+    automatic logic[7:0] vector_core_id = abs_core_id;
+
     bank_metadata_t meta;
 
     meta = '0;
@@ -336,7 +341,10 @@ module tcdm_adapter_tb;
       meta.ini_addr = abs_core_id;
       meta.ini_addr[IniAddrWidth-1] = 1'b0;
     end else begin
-      meta[MetaWidth-1:1] = abs_core_id;
+      meta.core_id  = vector_core_id[1:0];
+      meta.tile_id  = vector_core_id[5:2];
+      meta.ini_addr = vector_core_id[7:6];
+
       meta.ini_addr[IniAddrWidth-1] = 1'b1;
     end
     return meta;

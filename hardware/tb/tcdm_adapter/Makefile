@@ -10,9 +10,12 @@ MEMPOOL_DIR := $(shell git rev-parse --show-toplevel 2>/dev/null || echo $$MEMPO
 INSTALL_DIR := $(abspath $(MEMPOOL_DIR)/install)
 TOOLCHAIN_DIR := $(abspath $(MEMPOOL_DIR)/toolchain)
 
-# Include configuration
 config_mk := $(abspath $(MEMPOOL_DIR)/config/config.mk)
 include $(config_mk)
+
+# overwrite config to have mempool configuration
+num_cores = 256
+num_cores_per_tile = 4
 
 # build path
 buildpath       ?= build
