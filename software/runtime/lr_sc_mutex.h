@@ -57,45 +57,6 @@ static inline int32_t store_conditional(volatile void* const address, uint32_t c
 }
 
 /**
- * Expose the custom load reserved wait instructions. Loads a word from a specified
- * address and creates a reservation. Only receive a response to the load reserved
- * wait when you are the first core in the queue
- *
- * @param   address     Pointer to the address to create reservation and load
- *                      the value from.
- *
- * @return  Value currently stored in memory.
- */
-static inline uint32_t load_reserved_wait(volatile void* const address)
-{
-  uint32_t value;
-  __asm__ __volatile__ ("" : : : "memory");
-  asm volatile("lrwait.w %0, (%1)" : "=r"(value) : "r"(address));
-  __asm__ __volatile__ ("" : : : "memory");
-  return value;
-}
-
-/**
- * Expose the store-conditional instruction. Only stores a value if a previously
- * made reservation has not been broken by another core. Nested LRWait/SCWaits are
- * not allowed
- *
- * @param   address     A pointer to an address on L2 memory to store the value.
- * @param   value       Value to store.
- *
- * @return  0: Store was successful, the reservation was still valid.
- *          1: Reservation was broken, no store happened.
- */
-static inline int32_t store_conditional_wait(volatile void* const address, uint32_t const value)
-{
-  int32_t result;
-  __asm__ __volatile__ ("" : : : "memory");
-  asm volatile("scwait.w %0, %1, (%2)" : "=r"(result) : "r"(value), "r"(address));
-  __asm__ __volatile__ ("" : : : "memory");
-  return result;
-}
-
-/**
  * Try to acquire a specified lock.
  *
  * @param   mutex       A pointer to the mutex location to be locked.
@@ -140,38 +101,8 @@ static inline void lr_sc_unlock_mutex(lr_sc_mutex_t* const mutex)
   __asm__ __volatile__ ("" : : : "memory");
 }
 
-static inline int32_t lrwait_try_lock(lr_sc_mutex_t* const mutex)
-{
-  if (*mutex)
-    {
-      return 1;
-    }
-  else
-    {
-      load_reserved_wait(mutex);
-      return store_conditional_wait(mutex, 1);
-    }
-}
-
-static inline void lrwait_lock_mutex(lr_sc_mutex_t* const mutex,   uint32_t backoff)
-{
-  while(lrwait_try_lock(mutex))
-    {
-      mempool_wait(backoff);
-    }
-}
-
-static inline void lrwait_unlock_mutex(lr_sc_mutex_t* const mutex)
-{
-  __asm__ __volatile__ ("" : : : "memory");
-  do {
-    load_reserved_wait(mutex);
-  } while(store_conditional_wait(mutex, 0));
-  __asm__ __volatile__ ("" : : : "memory");
-}
-
 /**
- * Allocate and initialize a mutex in L2 memory.
+ * Allocate and initialize a mutex
  *
  * @return  A pointer to the allocated memory location to be used as a lock.
  *          NULL if memory allocation failed.
@@ -187,6 +118,8 @@ void lr_sc_free_mutex(lr_sc_mutex_t* mutex);
 
 /**
  * Swap value atomically if the old memory value matches.
+ * The store conditional in the else clause makes sure that the
+ * reservation is discarded if the CAS fails
  *
  * @param   address     A pointer to an address in L2 memory.
  * @param   old         The value expected in the memory.
@@ -197,18 +130,13 @@ void lr_sc_free_mutex(lr_sc_mutex_t* mutex);
 static inline int32_t compare_and_swap(volatile void* const address, uint32_t old, uint32_t new)
 {
   uint32_t temp = load_reserved(address);
-  if (temp == old)
+  if (temp == old) {
     return store_conditional(address, new);
-  else
+  }
+  else {
+    store_conditional(address, temp);
     return -1;
-}
-
-static inline void lr_sc_add(volatile void* const address, uint32_t const summand)
-{
-  uint32_t value;
-  do {
-    value = load_reserved(address) + summand;
-  } while(store_conditional(address, value));
+  }
 }
 
 #endif

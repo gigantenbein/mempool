@@ -20,8 +20,12 @@
 #define __NON_BLOCKING_QUEUE_LRSC_H__
 
 #include "alloc.h"
-#include "lr_sc_mutex.h"
 
+#if MUTEX == 0
+#include "lr_sc_mutex.h"
+#elif MUTEX == 1
+#include "lrwait_mutex.h"
+#endif
 
 //
 // Node & queue type
