@@ -47,15 +47,34 @@ int main() {
   non_blocking_node_t* temp;
 
   mempool_barrier(num_cores);
+  mempool_timer_t start_time = mempool_get_timer();
 
-  if (core_id < NUMBER_OF_NODES) {
-    cas_enqueue(&queue, (nodes+core_id));
-    temp = cas_dequeue(&queue);
-    for (int i = 0; i < 2; i++) {
-      cas_enqueue(&queue, temp);
-      write_csr(93, temp->value);
-      temp = cas_dequeue(&queue);
+  if (core_id < MATRIXCORES) {
+    enqueue(&queue, (nodes+core_id));
+
+    for (int i = 0; i < NUMCYCLES; i++) {
+#if BACKOFF != 0
+      mempool_wait(BACKOFF);
+#endif
+      temp = dequeue(&queue);
+#if BACKOFF != 0
+      mempool_wait(BACKOFF);
+#endif
+      enqueue(&queue, temp);
     }
+#if BACKOFF != 0
+      mempool_wait(BACKOFF);
+#endif
+    // temp = cas_dequeue(&queue);
+  }
+
+  mempool_timer_t stop_time = mempool_get_timer();
+  mempool_barrier(num_cores);
+
+  // dump times
+  if (core_id < MATRIXCORES) {
+    uint32_t time_diff = stop_time - start_time;
+    write_csr(time, time_diff);
   }
 
   mempool_barrier(num_cores);

@@ -94,10 +94,59 @@ int uninitialize_queue(non_blocking_queue_t* queue)
 
 //
 // Add a new value to an existing queue.
+#if MUTEX == 6
+int32_t lrwait_enqueue(non_blocking_queue_t* queue, non_blocking_node_t* volatile new_node) {
+  non_blocking_node_t volatile* tail;
+  non_blocking_node_t volatile* next;
+
+  tail = load_reserved_wait(&queue->tail);
+  tail->next = new_node;
+
+  return store_conditional_wait(&queue->tail, new_node);
+}
+
+non_blocking_node_t volatile* lrwait_dequeue(non_blocking_queue_t* queue) {
+  volatile uint32_t value = 0;
+  non_blocking_node_t volatile* head;
+  non_blocking_node_t volatile* tail;
+  non_blocking_node_t volatile* next;
+
+  tail = queue->tail;
+  head = (non_blocking_node_t*) load_reserved_wait(&queue->head);
+  next = head->next;
+
+  if (next == NULL) {
+    store_conditional_wait(&queue->head, head);
+    return NULL;
+  }
+  value = next->value;
+  store_conditional_wait(&queue->head, next);
+
+  head->next = NULL;
+  head->value = value;
+  return head;
+}
+#endif
+
+// CAS version taken from Michael, Maged M. and Scott, Michael L.
+// Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms
+
+//
+// Add a new value to an existing queue.
 int32_t cas_enqueue(non_blocking_queue_t* queue, non_blocking_node_t* volatile new_node) {
   non_blocking_node_t volatile* tail;
   non_blocking_node_t volatile* next;
+
+#if MUTEX == 6
+  load_reserved_wait(&new_node->next);
+  store_conditional_wait(&new_node->next, NULL);
+#elif MUTEX == 0
+  load_reserved(&new_node->next);
+  store_conditional(&new_node->next, NULL);
+#else
   new_node->next = NULL;
+#endif
+
 
   // Add node to queue
   while(1) {
@@ -150,9 +199,25 @@ non_blocking_node_t volatile* cas_dequeue(non_blocking_queue_t* queue)
   // Free the nodes memory
   // simple_free((void*) head);
   __asm__ __volatile__ ("" : : : "memory");
-  head->next = NULL;
+
   head->value = value;
   return head;
+}
+
+int32_t enqueue(non_blocking_queue_t* queue, non_blocking_node_t* volatile new_node) {
+#if MUTEX == 6
+  return lrwait_enqueue(queue, new_node);
+#else
+  return cas_enqueue(queue, new_node);
+#endif
+}
+
+non_blocking_node_t volatile* dequeue(non_blocking_queue_t* queue) {
+#if MUTEX == 6
+  return lrwait_dequeue(queue);
+#else
+  return cas_dequeue(queue);
+#endif
 }
 
 #endif
