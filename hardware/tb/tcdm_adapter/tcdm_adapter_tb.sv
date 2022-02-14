@@ -201,7 +201,7 @@ module tcdm_adapter_tb;
     stream_xbar #(
       .NumInp   (NumActiveCores   ),
       .NumOut   (NumTcdmBanks     ),
-      .payload_t(tcdm_req_t      )
+      .payload_t(tcdm_req_t       )
     ) i_interconnect_req (
       .clk_i  (clk                         ),
       .rst_ni (rst_n                       ),
@@ -221,9 +221,9 @@ module tcdm_adapter_tb;
     );
 
     stream_xbar #(
-      .NumInp   (NumTcdmBanks   ),
-      .NumOut   (NumActiveCores     ),
-      .payload_t (tcdm_resp_t)
+      .NumInp    (NumTcdmBanks   ),
+      .NumOut    (NumActiveCores ),
+      .payload_t (tcdm_resp_t    )
     ) i_interconnect_resp (
       .clk_i  (clk                         ),
       .rst_ni (rst_n                       ),

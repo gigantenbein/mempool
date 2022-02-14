@@ -85,7 +85,7 @@ module tcdm_adapter #(
   logic meta_valid,  meta_ready;
   logic rdata_valid, rdata_ready;
 
-  logic out_gnt;
+  logic out_gnt_d, out_gnt_q;
   logic pop_resp;
   logic pop_meta;
   logic gnt_meta;
@@ -145,7 +145,7 @@ module tcdm_adapter #(
     .clr_i     (1'b0       ),
     .testmode_i(1'b0       ),
     .data_i    (out_rdata  ),
-    .valid_i   (out_gnt    ),
+    .valid_i   (out_gnt_q  ),
     .ready_o   (rdata_ready),
     .data_o    (in_rdata_o ),
     .valid_o   (rdata_valid),
@@ -174,12 +174,11 @@ module tcdm_adapter #(
   // meta data should be discarded after WakeUpReq came in
   assign pop_meta   = pop_resp || discard_meta;
 
-  // Generate out_gnt one cycle after sending read request to the bank
-  `FF(out_gnt, (out_req_o && !out_write_o) ||
-               sc_successful_d ||
-               successor_update_d ||
-               (lrwait_active_q),
-               1'b0, clk_i, rst_ni);
+  assign out_gnt_d = (out_req_o && !out_write_o) || sc_successful_d ||
+                     successor_update_d || (lrwait_active_q);
+
+  // Generate out_gnt_q one cycle after sending read request to the bank
+  `FF(out_gnt_q, out_gnt_d, 1'b0, clk_i, rst_ni);
 
   // Or the signal from SC and SCWait
   if (LrWaitEnable || LrScEnable) begin
@@ -680,7 +679,7 @@ module tcdm_adapter #(
 
   `ifndef VERILATOR
     rdata_full : assert property(
-      @(posedge clk_i) disable iff (~rst_ni) (out_gnt |-> rdata_ready))
+      @(posedge clk_i) disable iff (~rst_ni) (out_gnt_q |-> rdata_ready))
       else $fatal (1, "Trying to push new data although the i_rdata_register is not ready.");
     meta_valid_not_asserted : assert property(
       @(posedge clk_i) disable iff (~rst_ni) ((sc_active || successor_update_q)

@@ -143,14 +143,14 @@ package mempool_pkg;
     logic write;
     data_t data;
     strb_t strb;
-  } snitch_dreq_t;
+  } mempool_dreq_t;
 
   typedef struct packed {
     data_t data;
     meta_id_t id;
     logic lrwait;
     logic error;
-  } snitch_dresp_t;
+  } mempool_dresp_t;
 
   typedef struct packed {
     meta_id_t meta_id;

@@ -119,6 +119,7 @@ module lrwait_qnode
   enum logic [1:0] {
     Idle, ReadyForSCWait, InLRWaitQueue, SendWakeUp
   } state_q, state_d;
+  `FF(state_q, state_d, Idle, clk_i, rst_ni);
 
   // define next node pointer
   typedef struct packed {
@@ -293,14 +294,6 @@ module lrwait_qnode
       end
     endcase
   end // always
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      state_q         <= Idle;
-    end else begin
-      state_q         <= state_d;
-    end
-  end
 
   // pragma translate_off
 
