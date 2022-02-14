@@ -1328,26 +1328,34 @@ module snitch
 
       /* XLRWait extension */
       riscv_instr::LRWAIT_W: begin
-        alu_op = BypassA;
-        write_rd = 1'b0;
-        uses_rd = 1'b1;
-        is_load = 1'b1;
-        is_signed = 1'b1;
-        ls_size = Word;
-        ls_amo = LRWAIT;
-        opa_select = Reg;
-        opb_select = Reg;
+        if (snitch_pkg::XLRWAIT) begin
+          alu_op = BypassA;
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          is_load = 1'b1;
+          is_signed = 1'b1;
+          ls_size = Word;
+          ls_amo = LRWAIT;
+          opa_select = Reg;
+          opb_select = Reg;
+        end else begin
+          illegal_inst = 1'b1;
+        end
       end
       riscv_instr::SCWAIT_W: begin
-        alu_op = BypassA;
-        write_rd = 1'b0;
-        uses_rd = 1'b1;
-        is_load = 1'b1;
-        is_signed = 1'b1;
-        ls_size = Word;
-        ls_amo = SCWAIT;
-        opa_select = Reg;
-        opb_select = Reg;
+        if (snitch_pkg::XLRWAIT) begin
+          alu_op = BypassA;
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          is_load = 1'b1;
+          is_signed = 1'b1;
+          ls_size = Word;
+          ls_amo = SCWAIT;
+          opa_select = Reg;
+          opb_select = Reg;
+        end else begin
+          illegal_inst = 1'b1;
+        end
       end
       /* XLRWait extension */
 

@@ -38,3 +38,6 @@ l2_size ?= 10000
 
 # Enable the XpulpIMG extension
 xpulpimg ?= 1
+
+# Enable the XLRWAIT extension
+xlrwait ?= 1

@@ -15,6 +15,8 @@ package snitch_pkg;
   localparam MetaIdWidth                = idx_width(NumIntOutstandingLoads);
   // Xpulpimg extension enabled?
   localparam bit XPULPIMG = `ifdef XPULPIMG `XPULPIMG `else 1'bX `endif;
+  // XLrWait extension enabled?
+  localparam bit XLRWAIT = `ifdef XLRWAIT `XPULPIMG `else 1'bX `endif;
 
   typedef logic [31:0]               addr_t;
   typedef logic [DataWidth-1:0]      data_t;

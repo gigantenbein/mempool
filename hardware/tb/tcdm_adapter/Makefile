@@ -52,7 +52,7 @@ vlog_args += -work $(library)
 # Defines
 vlog_defs += -DNUM_CORES=$(num_cores) -DNUM_CORES_PER_TILE=$(num_cores_per_tile)
 vlog_defs += -DL2_BASE="32'h$(l2_base)" -DL2_SIZE="32'h$(l2_size)"
-vlog_defs += -DBOOT_ADDR="32'h$(boot_addr)" -DXPULPIMG="1'b$(xpulpimg)"
+vlog_defs += -DBOOT_ADDR="32'h$(boot_addr)" -DXPULPIMG="1'b$(xpulpimg)" -DXLRWAIT="1'b$(xlrwait)"
 
 .DEFAULT_GOAL := compile
 
