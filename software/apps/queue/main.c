@@ -8,17 +8,16 @@
 #include <string.h>
 
 #include "encoding.h"
-#include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
 
-#include "non_blocking_queue.h"
+#include "queue.h"
 
 #define NUMBER_OF_NODES 256
 
-non_blocking_queue_t queue __attribute__((section(".l1_prio")));
-non_blocking_node_t nodes[NUMBER_OF_NODES] __attribute__((section(".l1_prio")));
-non_blocking_node_t dummy_node __attribute__((section(".l1_prio")));
+queue_t queue __attribute__((section(".l1_prio")));
+node_t nodes[NUMBER_OF_NODES] __attribute__((section(".l1_prio")));
+node_t dummy_node __attribute__((section(".l1_prio")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -35,23 +34,27 @@ int main() {
     dummy_node.value = 0;
     queue.head = &dummy_node;
     queue.tail = &dummy_node;
+
+#if MUTEX == 1
+    queue.head_lock = amo_allocate_mutex();
+    queue.tail_lock = amo_allocate_mutex();
+#endif
   }
 
   // initialize nodes to enqueue
-  if(core_id == 0){
+  if(core_id == 0) {
     for (uint32_t i = 0; i<NUMBER_OF_NODES; i++){
       nodes[i].next = NULL;
       nodes[i].value = i;
     }
   }
-  non_blocking_node_t* temp;
+  node_t* temp;
 
   mempool_barrier(num_cores);
   mempool_timer_t start_time = mempool_get_timer();
 
   if (core_id < MATRIXCORES) {
     enqueue(&queue, (nodes+core_id));
-
     for (int i = 0; i < NUMCYCLES; i++) {
 #if BACKOFF != 0
       mempool_wait(BACKOFF);
