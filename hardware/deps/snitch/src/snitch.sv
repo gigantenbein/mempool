@@ -154,7 +154,8 @@ module snitch
     AMOLR   = 4'hA,
     AMOSC   = 4'hB,
     LRWAIT  = 4'hC,
-    SCWAIT  = 4'hD
+    SCWAIT  = 4'hD,
+    MWAIT   = 4'hE
   } ls_amo;
 
   logic [31:0] ld_result;
@@ -1351,6 +1352,21 @@ module snitch
           is_signed = 1'b1;
           ls_size = Word;
           ls_amo = SCWAIT;
+          opa_select = Reg;
+          opb_select = Reg;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::MWAIT_W: begin
+        if (snitch_pkg::XLRWAIT) begin
+          alu_op = BypassA;
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          is_load = 1'b1;
+          is_signed = 1'b1;
+          ls_size = Word;
+          ls_amo = MWAIT;
           opa_select = Reg;
           opb_select = Reg;
         end else begin
