@@ -23,6 +23,8 @@
 // LRWaitResp : Load reserved resp going from TCDM to Snitch
 // SCWaitReq  : Store conditional req going from Snitch to TCDM
 // SCWaitResp : Store conditional resp coming from TCDM to Snitch
+// MWaitReq   : Monitoring request from Snitch to TCDM
+// MWaitResp  : Value from memory indicating that value changed
 // SuccUpdate : Successor update sent by TCDM when a Load reserved at the
 //              the TCDM arrives and the Tail node is already occupied. The
 //              tail node is then replaced with the requester and a
@@ -113,12 +115,14 @@ module lrwait_qnode
     AMOLR   = 4'hA,
     AMOSC   = 4'hB,
     LRWAIT  = 4'hC,
-    SCWAIT  = 4'hD
+    SCWAIT  = 4'hD,
+    MWAIT  = 4'hE
   } amo_op_t;
 
-  enum logic [1:0] {
-    Idle, ReadyForSCWait, InLRWaitQueue, SendWakeUp
+  enum logic [2:0] {
+    Idle, ReadyForSCWait, InLRWaitQueue, Monitoring, SendWakeUp
   } state_q, state_d;
+
   `FF(state_q, state_d, Idle, clk_i, rst_ni);
 
   // define next node pointer
@@ -145,6 +149,9 @@ module lrwait_qnode
   logic sc_req_arrived_d, sc_req_arrived_q;
   `FF(sc_req_arrived_q, sc_req_arrived_d, 1'b0, clk_i, rst_ni);
 
+  logic monitor_successor_arrived_d, monitor_successor_arrived_q;
+  `FF(monitor_successor_arrived_q, monitor_successor_arrived_d, 1'b0, clk_i, rst_ni);
+
   // allow signals to directly pass
   logic pass_through_request, pass_through_response;
 
@@ -169,6 +176,7 @@ module lrwait_qnode
     next_node_d      = next_node_q;
 
     sc_req_arrived_d = sc_req_arrived_q;
+    monitor_successor_arrived_d = monitor_successor_arrived_q;
 
     tile_qvalid_o    = pass_through_request ? snitch_qvalid_i : 1'b0;
     tile_qdata_o     = snitch_qdata_i;
@@ -189,6 +197,11 @@ module lrwait_qnode
             next_node_d.instruction_id = snitch_qid_i;
             next_node_d.addr           = snitch_qaddr_i;
             next_node_d.valid          = 1'b1;
+          end else if (amo_op_t'(snitch_qamo_i) == MWAIT) begin
+            next_node_d.instruction_id = snitch_qid_i;
+            next_node_d.addr           = snitch_qaddr_i;
+            next_node_d.valid          = 1'b1;
+            state_d = Monitoring;
           end
         end
         // a response arrives
@@ -265,12 +278,47 @@ module lrwait_qnode
         end
       end // case: InLRWaitQueue
 
+      Monitoring : begin
+        // a resp arrives
+        if (tile_pvalid_i) begin
+          if (tile_plrwait_i == 1'b1) begin
+            // the response is a SuccUpdate
+            next_node_d.metadata = tile_pdata_i[MetaWidth-1:0];
+            monitor_successor_arrived_d = 1'b1;
+
+            next_node_d.valid = 1'b1;
+          end else if(tile_pid_i == next_node_q.instruction_id
+                      && next_node_q.valid == 1'b1) begin
+            // the Resp that arrived is a MResp, thus we can forward
+            // it to Snitch and if we have a Successor, wake him up
+            // as well
+            if(snitch_pready_i == 1'b1) begin
+              // only go to next state when handshake happened
+              if (monitor_successor_arrived_q == 1'b1) begin
+                // we have a valid Succesor and need to wake him up
+                state_d = SendWakeUp;
+              end else begin
+                // we can go back to the Idle state
+                next_node_d.valid = 1'b0;
+                state_d = Idle;
+              end
+            end
+          end
+        end
+      end // case: Monitoring
+
       SendWakeUp: begin
         sc_req_arrived_d  = 1'b0;
+        monitor_successor_arrived_d  = 1'b0;
+
         next_node_d.valid = 1'b0;
 
-        // send wake up
-        tile_qamo_o    = LRWAIT;
+        // send wake up with corresponding AMO
+        if (monitor_successor_arrived_q == 1'b1) begin
+          tile_qamo_o    = MWAIT;
+        end else begin
+          tile_qamo_o    = LRWAIT;
+        end
         tile_qaddr_o   = next_node_q.addr;
 
         // set metadata and set lrwait flag
@@ -340,7 +388,21 @@ module lrwait_qnode
                                              (amo_op_t'(snitch_qamo_i) == SCWAIT))|->
                                              !sc_req_arrived_q))
     else $warning ("More than one SCWait was sent for a LRWait");
+
+  no_mwait_lrwait_scwait_combo : assert property(
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == Monitoring) &&
+                                             (snitch_qvalid_i && tile_qready_i))|->
+                                             (amo_op_t'(snitch_qamo_i) != SCWAIT)||
+                                             (amo_op_t'(snitch_qamo_i) != LRWAIT)))
+    else $warning ("LRWait or SCWait while a Monitor is active is illegal!");
+
+  monitor_flag_low_in_lrwait_states : assert property(
+    @(posedge clk_i) disable iff (~rst_ni) (((state_q == ReadyForSCWait) ||
+                                             (state_q == InLRWaitQueue))|->
+                                            (monitor_successor_arrived_d == 1'b0) &&
+                                            (monitor_successor_arrived_q == 1'b0)))
+    else $warning ("Make sure monitor flag is always properly reset.");
+
 `endif
   // pragma translate_on
-
 endmodule
