@@ -318,6 +318,9 @@ module tcdm_adapter_tb;
       abs_core_id[1:0] = meta.core_id;
       abs_core_id[5:2] = meta.tile_id;
       abs_core_id[7:6] = meta.ini_addr;
+
+      // add 4 since the first 4 cores are in ini_addr only
+      abs_core_id     += 4;
     end // else: !if(meta.ini_addr[IniAddrWidth-1] == 1'b0)
 
     return abs_core_id;
@@ -341,6 +344,8 @@ module tcdm_adapter_tb;
       meta.ini_addr = abs_core_id;
       meta.ini_addr[IniAddrWidth-1] = 1'b0;
     end else begin
+      // we start counting from 0 when we come from a remote tile
+      vector_core_id = abs_core_id - 4;
       meta.core_id  = vector_core_id[1:0];
       meta.tile_id  = vector_core_id[5:2];
       meta.ini_addr = vector_core_id[7:6];
@@ -422,7 +427,10 @@ typedef enum logic [1:0] {
       end
     end
     return 1;
-  endfunction
+  endfunction // all_generators_finished
+
+  // each address that is monitored gets pushed to this queue
+  addr_t monitored_addresses[$];
 
 // Description:
 // Draw a random core id and generate requests in a fixed order
@@ -450,14 +458,16 @@ class Generator;
     if (FULL_RANDOM_TEST) {
       // pick a random address from possible addresses
       rand_addr > 0;
-      rand_addr < NumTcdmBanks * TCDMSizePerBank;
+      rand_addr < NumTcdmBanks * 256;
 
       // generate random data
       rand_data > 0;
       rand_data < 32000;
     }
     else {
-      rand_addr inside {1,2,3,4,5};
+      // rand_addr inside {1,2,3,4,5};
+      // rand_addr inside {1,2,3,4,5,6};
+      rand_addr inside {1,2};
       // generate random data
       rand_data > 0;
       rand_data < 32000;
@@ -467,6 +477,7 @@ class Generator;
   function new(input int core_id);
     core_index = core_id;
     this.core_status = Active;
+    $display("this is the address range %d", NumTcdmBanks * TCDMSizePerBank);
 
   endfunction; // new
 
@@ -487,7 +498,18 @@ class Generator;
           core_status = WaitForResp;
         end
 
+        if (core_index == 0) begin
+          while(monitored_addresses.size() != 0) begin
+            write_memory(.addr(monitored_addresses.pop_front()),.data(rand_data),.core_id(core_index));
+            // do not expect a response from write
+            core_status = Active;
+            // $display("Writing to monitored location to wake everybody up!");
+            #(1000*ClockPeriod);
+          end
+        end
+
         wait(core_status == Active);
+        $display("Core %d finished", core_index);
 
         respdriver[core_index].finished_generator = 1'b1;
 
@@ -499,12 +521,18 @@ class Generator;
 
     // only generate SC request AFTER a LR has been issued
     // TODO store address during LR for subsequent LR
+
     wait((core_status == Active) || (core_status == DoSCNext));
 
     unique case (core_status)
       Active: begin
         // get index for random instruction
-        random_draw = $urandom_range(2);
+        if (core_index == 0) begin
+          // don't let core 0 monitor addresses since he wakes everybody up
+          random_draw = $urandom_range(2);
+        end else begin
+          random_draw = $urandom_range(3);
+        end
         // get random address and random number
         if(!this.randomize()) begin
           $display("Failed to randomize Generator class.");
@@ -522,6 +550,11 @@ class Generator;
           end
           2: begin
             read_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+            core_status = WaitForResp;
+          end
+          3: begin
+            monitor_wait(.addr(rand_addr),.data('1),.core_id(core_index));
+            monitored_addresses.push_back(rand_addr);
             core_status = WaitForResp;
           end
           default: $display("invalid number drawn");
@@ -686,9 +719,13 @@ endclass : RespDriver;
 // can be stored
 class GoldenTCDM;
 
-  // create a queue for each adress that is reserved
+  // create a queue for each address that is reserved
   reservation_queue_t reservation_queues[bank_addr_t];
   logic               reservation_queues_valid[bank_addr_t];
+
+  // create a separate monitor queue for each address
+  reservation_queue_t monitor_queues[bank_addr_t];
+  logic               monitor_queues_valid[bank_addr_t];
 
   data_t              resp_data;
   bank_metadata_t     resp_metadata;
@@ -756,6 +793,18 @@ class GoldenTCDM;
       4'hD: goldenmodel_tcdm[tcdm_index].store_conditional(.addr(addr),
                                                            .metadata(metadata),
                                                            .data(data));
+      4'hE: begin
+        if (metadata.lrwait == 1'b0) begin
+          goldenmodel_tcdm[tcdm_index].monitor_wait(.addr(addr),
+                                                    .metadata(metadata),
+                                                    .data(data));
+        end else begin
+          goldenmodel_tcdm[tcdm_index].monitor_wait_wake_up(.addr(addr),
+                                                            .metadata(metadata),
+                                                            .data(data));
+        end
+      end
+
       4'h0: begin
         if (wen) begin
           goldenmodel_tcdm[tcdm_index].write_access(.addr(addr), .data(data));
@@ -778,6 +827,7 @@ class GoldenTCDM;
   // No response is expected
   function void write_access(input bank_addr_t addr,
                              input data_t data);
+    automatic int resp_core_id;
     if (VERBOSE) begin
       $display("write access addr %h ", addr);
     end
@@ -797,7 +847,32 @@ class GoldenTCDM;
       if (reservation_queues[addr].size() == 1) begin
         void'(reservation_queues[addr].pop_front());
       end
+    end // if (reservation_queues.exists(addr) &&...
+
+    if (monitor_queues.exists(addr) &&
+        monitor_queues[addr].size() != 0) begin
+      // a monitored value was changed
+      // release answer to first core
+      if (monitor_queues_valid[addr] == 1'b1) begin
+        $display("write monitor update %h", data);
+
+
+        resp_metadata = monitor_queues[addr][0];
+        resp_core_id = get_core_id_as_int(.meta(resp_metadata));
+
+        respdriver[resp_core_id].expected_data_resp.push_back(data);
+        respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
+
+        // pop monitor reservation if it is the only one in the queue
+        if (monitor_queues[addr].size() == 1) begin
+          void'(monitor_queues[addr].pop_front());
+        end
+        monitor_queues_valid[addr] = 1'b0;
+      end else begin
+        $display("Update was already triggered, do nothing");
+      end
     end
+
   endfunction; // write_access
 
   // Golden model for read access to TCDM
@@ -805,7 +880,7 @@ class GoldenTCDM;
                             input bank_metadata_t metadata);
     automatic int req_core_id = get_core_id_as_int(.meta(metadata));
     if (VERBOSE) begin
-      $display("read access");
+      $display("read access from core %d to addr %h", req_core_id, addr);
     end
     if (mock_memory.exists(addr)) begin
       resp_data = mock_memory[addr];
@@ -815,6 +890,137 @@ class GoldenTCDM;
     respdriver[req_core_id].expected_data_resp.push_back(resp_data);
     respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
   endfunction; // read_access
+
+  // monitor_wait only returns a value if a value at memory location is
+  // not expected
+  function void monitor_wait(input bank_addr_t addr,
+                             input data_t data,
+                             input bank_metadata_t metadata);
+    automatic int req_core_id = get_core_id_as_int(.meta(metadata));
+    if (VERBOSE) begin
+      $display("monitor wait addr %h data %h metadata %h, core_id %d",
+               addr, data, metadata, req_core_id);
+    end
+    // fetch value from golden memory
+    if (mock_memory.exists(addr)) begin
+      resp_data = mock_memory[addr];
+    end else begin
+      resp_data = 32'hffffffff;
+    end
+
+    // If memory value does not match expectation, send response directly
+    if (resp_data != data) begin
+      respdriver[req_core_id].expected_data_resp.push_back(resp_data);
+      respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+      if (VERBOSE) begin
+        $display("Value not as expected, sending response directly.");
+      end
+    end else begin
+      // handle monitor queue
+      get_number_of_active_queues();
+      if ((current_queue_size < LrWaitQueueSize) &&
+          (number_of_active_queues < NumLrWaitAddr)) begin
+        // there is an empty queue node available
+        queue_is_full = 0;
+      end else if (monitor_queues.exists(addr)) begin
+        // all queue nodes are occupied, but an occupied node contains the same
+        // address
+        if (monitor_queues[addr].size() == 0) begin
+          queue_is_full = 1;
+        end else begin
+          queue_is_full = 0;
+        end
+      end else begin
+        // all nodes are occupied and no queue node matches the current address
+        queue_is_full = 1;
+      end // else: !if(monitor_queues.exists(addr))
+
+      if (!queue_is_full) begin
+        if (monitor_queues.exists(addr)) begin
+        // has a reservation already been placed in the queue?
+          if (monitor_queues[addr].size() == 0) begin
+            if (VERBOSE) begin
+              $display("monitor queue empty");
+            end
+            // queue was empty, push monitor to queue
+            monitor_queues_valid[addr] = 1'b1;
+            monitor_queues[addr].push_back(metadata);
+          end
+          // Push metadata to monitoring queue
+          monitor_queues[addr].push_back(metadata);
+        end else begin // if (monitor_queues.exists(addr))
+          // Push metadata to monitoring queue
+          // queue was empty
+          monitor_queues_valid[addr] = 1'b1;
+          monitor_queues[addr].push_back(metadata);
+        end
+      end else begin
+        // queue is full, we immediately bounce back an update
+        respdriver[req_core_id].expected_data_resp.push_back(resp_data);
+        respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+      end
+    end
+
+  endfunction; // read_access
+  function void monitor_wait_wake_up(input bank_addr_t addr,
+                                     input data_t data,
+                                     input bank_metadata_t metadata);
+    automatic int req_core_id = get_core_id_as_int(.meta(metadata));
+    automatic int resp_core_id;
+    if (monitor_queues.exists(addr)) begin
+      // has a reservation already been placed in the queue?
+      if (monitor_queues[addr].size() == 0) begin
+        if (VERBOSE) begin
+          $display("monitor queue empty");
+        end
+        void'(monitor_queues[addr].pop_front());
+
+        // infer sucessor from data sent by WakeUp
+        resp_metadata = data;
+        resp_core_id = get_core_id_as_int(.meta(resp_metadata));
+
+        respdriver[resp_core_id].expected_data_resp.push_back(resp_data);
+        respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
+      end
+    end else begin // if (monitor_queues.exists(addr))
+      $display("received WakeUp to an invalid location!");
+    end
+
+  endfunction; // monitor_wait_wake_up
+
+  function void get_number_of_active_queues();
+    current_queue_size = 0;
+    number_of_active_queues = 0;
+    if (reservation_queues.first(check_size)) begin
+      do begin
+        if (reservation_queues[check_size].size() >= 1 &&
+            reservation_queues_valid[check_size]) begin
+          // there is a reservation queue for the current address
+          number_of_active_queues += 1;
+          $display("lrwait queue for %h", check_size);
+        end
+        current_queue_size += reservation_queues[check_size].size();
+      end while (reservation_queues.next(check_size));
+    end // if (reservation_queues.first(check_size))
+
+    if (monitor_queues.first(check_size)) begin
+      do begin
+        if (monitor_queues[check_size].size() >= 1 &&
+            monitor_queues_valid[check_size]) begin
+          // there is a monitor queue for the current address
+          number_of_active_queues += 1;
+          $display("monitor queue for %h", check_size);
+        end
+        current_queue_size += monitor_queues[check_size].size();
+      end while (monitor_queues.next(check_size));
+    end // if (monitor_queues.first(check_size))
+
+    $display("number_of_active_queues %d", number_of_active_queues);
+    $display("current_queue_size %d", current_queue_size);
+
+
+  endfunction; // get_current_active_queue_size
+
 
   function void load_reserved(input bank_addr_t addr,
                               input bank_metadata_t metadata);
@@ -836,39 +1042,26 @@ class GoldenTCDM;
     // to not exceed total queue size
 
     // if reservation_queues is not empty, check the size of each entry
-    if (reservation_queues.first(check_size)) begin
-      current_queue_size = 0;
-      number_of_active_queues = 0;
+    get_number_of_active_queues();
 
-      do begin
-        if (reservation_queues[check_size].size() >= 1) begin
-          // there is a reservation queue for the current address
-          number_of_active_queues += 1;
-        end
-        current_queue_size += reservation_queues[check_size].size();
-      end while (reservation_queues.next(check_size) >= 1);
-      if (VERBOSE) begin
-        $display("Current size of reservation queue %d ", current_queue_size);
-        $display("Number of active queues %d ", number_of_active_queues);
-      end
-      if ((current_queue_size < LrWaitQueueSize) &&
-          (number_of_active_queues < NumLrWaitAddr)) begin
-        // there is an empty queue node available
-        queue_is_full = 0;
-      end else if (reservation_queues.exists(addr)) begin
+    if ((current_queue_size < LrWaitQueueSize) &&
+        (number_of_active_queues < NumLrWaitAddr)) begin
+      // there is an empty queue node available
+      queue_is_full = 0;
+    end else if (reservation_queues.exists(addr)) begin
 
-        // all queue nodes are occupied, but an occupied node contains the same
-        // address
-        if (reservation_queues[addr].size() == 0) begin
-          queue_is_full = 1;
-        end else begin
-          queue_is_full = 0;
-        end
-      end else begin
-        // all nodes are occupied and no queue node matches the current address
+      // all queue nodes are occupied, but an occupied node contains the same
+      // address
+      if (reservation_queues[addr].size() == 0) begin
         queue_is_full = 1;
+      end else begin
+        queue_is_full = 0;
       end
+    end else begin
+      // all nodes are occupied and no queue node matches the current address
+      queue_is_full = 1;
     end
+
 
     // Check if queue is full, else ignore reservation and send out response directly
     if(!queue_is_full) begin
@@ -988,8 +1181,9 @@ class GoldenTCDM;
       // pop reservation which has been invalidated before
       void'(reservation_queues[addr].pop_front());
 
-      // infer sucessor from new head of queue
-      resp_metadata = reservation_queues[addr][0];
+      // infer successor from data that was sent
+      resp_metadata = data;
+
       resp_core_id = get_core_id_as_int(.meta(resp_metadata));
       if (VERBOSE) begin
         $display("Received WakeUp req, sending response to core %d", resp_core_id);
@@ -1189,6 +1383,19 @@ endclass // Scoreboard
 
     inpdriver[core_id].send_request_from_core(req[core_id]);
   endtask // load_reserved
+
+  task monitor_wait(input addr_t addr,
+                    input data_t data,
+                    input int    core_id);
+    req[core_id].addr    = addr;
+    req[core_id].data    = data;
+    req[core_id].amo     = 4'hE;
+    req[core_id].wen     = 1'b0;
+    req[core_id].be      = 4'h0;
+    req[core_id].core_id = core_id;
+
+    inpdriver[core_id].send_request_from_core(req[core_id]);
+  endtask // store_conditional
 
   task write_memory( input addr_t addr,
                      input data_t data,

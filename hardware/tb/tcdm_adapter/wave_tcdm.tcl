@@ -8,6 +8,10 @@ quietly WaveActivateNextPane {} 0
 add wave -noupdate -group DUT /tcdm_adapter_tb/*
 
 add wave -noupdate -group TCDMAdapter0 /tcdm_adapter_tb/gen_tcdms[0]/i_tcdm_adapter/*
+add wave -noupdate -group TCDMAdapter0 /tcdm_adapter_tb/gen_tcdms[0]/i_tcdm_adapter/gen_lrwait/*
+add wave -noupdate -group TCDMAdapter0 /tcdm_adapter_tb/gen_tcdms[0]/i_tcdm_adapter/gen_lrwait/gen_multip_lrwait_nodes/*
+add wave -noupdate -group TCDMAdapter0 /tcdm_adapter_tb/gen_tcdms[0]/i_tcdm_adapter/i_metadata_register/*
+add wave -noupdate -group TCDMAdapter0 /tcdm_adapter_tb/gen_tcdms[0]/i_tcdm_adapter/i_metadata_register/spill_register_flushable_i/gen_spill_reg/*
 add wave -noupdate -group TCDMAdapter1 /tcdm_adapter_tb/gen_tcdms[1]/i_tcdm_adapter/*
 add wave -noupdate -group TCDMAdapter2 /tcdm_adapter_tb/gen_tcdms[2]/i_tcdm_adapter/*
 add wave -noupdate -group TCDMAdapter3 /tcdm_adapter_tb/gen_tcdms[3]/i_tcdm_adapter/*
