@@ -132,7 +132,8 @@ module tcdm_adapter_tb;
     // addr = 32 bit
     // addr[31:8] indicates TCDM bank to pick
     // addr[7:0]  is address in TCDM bank
-    assign select_tcdm_bank[c] = tile_req[c].addr[TCDMAddrMemWidth + SelTcdmWidth-1:TCDMAddrMemWidth];
+    // TCDMAddrWidth = 8
+    assign select_tcdm_bank[c] = tile_req[c].addr[8 + SelTcdmWidth-1:8];
 
     assign tile_req_xbar_in[c].addr         = tile_req[c].addr;
     assign tile_req_xbar_in[c].write        = tile_req[c].write;
@@ -477,7 +478,6 @@ class Generator;
   function new(input int core_id);
     core_index = core_id;
     this.core_status = Active;
-    $display("this is the address range %d", NumTcdmBanks * TCDMSizePerBank);
 
   endfunction; // new
 
@@ -531,7 +531,7 @@ class Generator;
           // don't let core 0 monitor addresses since he wakes everybody up
           random_draw = $urandom_range(2);
         end else begin
-          random_draw = $urandom_range(3);
+          random_draw = $urandom_range(2);
         end
         // get random address and random number
         if(!this.randomize()) begin
@@ -540,19 +540,23 @@ class Generator;
         end
         unique case (random_draw)
           0: begin
-            load_reserved(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            core_status = WaitForLRResp;
-          end
-          1: begin
             write_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
             // do not expect a response from write
             core_status = Active;
           end
-          2: begin
+          1: begin
             read_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
             core_status = WaitForResp;
           end
+          2: begin
+            amo_swap(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+            core_status = WaitForResp;
+          end
           3: begin
+            load_reserved(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+            core_status = WaitForLRResp;
+          end
+          4: begin
             monitor_wait(.addr(rand_addr),.data('1),.core_id(core_index));
             monitored_addresses.push_back(rand_addr);
             core_status = WaitForResp;
@@ -779,6 +783,9 @@ class GoldenTCDM;
     end
 
     unique case (amo)
+      4'h1: goldenmodel_tcdm[tcdm_index].amo_swap(.addr(addr),
+                                                  .metadata(metadata),
+                                                  .data(data));
       4'hC: begin
         if (metadata.lrwait == 1'b0) begin
           goldenmodel_tcdm[tcdm_index].load_reserved(.addr(addr),
@@ -887,6 +894,30 @@ class GoldenTCDM;
     end else begin
       resp_data = 32'hffffffff;
     end
+    respdriver[req_core_id].expected_data_resp.push_back(resp_data);
+    respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+  endfunction; // read_access
+
+  // Golden model for amo_swap to TCDM
+  function void amo_swap(input bank_addr_t addr,
+                         input data_t data,
+                         input bank_metadata_t metadata);
+    automatic int req_core_id = get_core_id_as_int(.meta(metadata));
+    if (VERBOSE) begin
+      $display("amo swap from core %d to addr %h", req_core_id, addr);
+    end
+
+    // read data from memory
+    if (mock_memory.exists(addr)) begin
+      resp_data = mock_memory[addr];
+      $display("amo swap value marc %h %h",resp_data, addr);
+    end else begin
+      resp_data = 32'hffffffff;
+    end
+    // write value from swap to mock memory
+    mock_memory[addr] = data;
+    $display("amo swap value marc %h %h",resp_data, addr);
+
     respdriver[req_core_id].expected_data_resp.push_back(resp_data);
     respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
   endfunction; // read_access
@@ -1357,6 +1388,19 @@ endclass // Scoreboard
   GoldenTCDM goldenmodel_tcdm[NumTcdmBanks-1:0];
 
   Scoreboard scrbrd;
+
+  task amo_swap(input addr_t  addr,
+                         input  data_t data,
+                         input int     core_id);
+    req[core_id].addr    = addr;
+    req[core_id].data    = data;
+    req[core_id].amo     = 4'h1;
+    req[core_id].wen     = 1'b0;
+    req[core_id].be      = 4'hF;
+    req[core_id].core_id = core_id;
+
+    inpdriver[core_id].send_request_from_core(req[core_id]);
+  endtask // store_conditional
 
   task store_conditional(input addr_t  addr,
                          input  data_t data,
