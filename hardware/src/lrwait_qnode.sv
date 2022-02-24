@@ -116,7 +116,7 @@ module lrwait_qnode
     AMOSC   = 4'hB,
     LRWAIT  = 4'hC,
     SCWAIT  = 4'hD,
-    MWAIT  = 4'hE
+    MWAIT   = 4'hE
   } amo_op_t;
 
   enum logic [2:0] {
@@ -309,7 +309,6 @@ module lrwait_qnode
 
       SendWakeUp: begin
         sc_req_arrived_d  = 1'b0;
-        monitor_successor_arrived_d  = 1'b0;
 
         next_node_d.valid = 1'b0;
 
@@ -334,6 +333,7 @@ module lrwait_qnode
         if (tile_qready_i == 1'b1) begin
           // handshake happened
           state_d = Idle;
+          monitor_successor_arrived_d  = 1'b0;
         end
       end // case: SendWakeUp
 
