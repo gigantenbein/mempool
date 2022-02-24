@@ -89,12 +89,16 @@ module tcdm_adapter #(
   logic pop_resp;
   logic pop_meta;
   logic gnt_meta;
-  logic discard_meta;
 
   // AMO
   enum logic [1:0] {
       Idle, DoAMO, WriteBackAMO
-  } state_q, state_d;
+  } amo_state_q, amo_state_d;
+
+  // Colibri
+  enum logic [2:0] {
+      ColibriIdle, DoLRWait, DoSCWait, DoMWait, MonitorTriggered
+  } colibri_state_q, colibri_state_d;
 
   logic                 load_amo;
   amo_op_t              amo_op_q;
@@ -105,7 +109,7 @@ module tcdm_adapter #(
   logic [31:0] amo_result, amo_result_q;
 
   // indicate if request was a SC or a SCWait
-  logic        sc_active;
+  logic        sc_active_d, sc_active_q;
   logic        sc_successful_d, sc_successful_q;
 
   logic        sc_lrsc_successful_d;
@@ -117,23 +121,23 @@ module tcdm_adapter #(
   // of successor
   logic        successor_update_d, successor_update_q;
 
-  logic        lrwait_active_d, lrwait_active_q;
-  logic        scwait_active_d, scwait_active_q;
   logic        write_occurred_d, write_occurred_q;
+  logic        monitor_triggered_d, monitor_triggered_q;
+  logic        send_monitor;
 
   // Store the metadata at handshake
   spill_register #(
-    .T     (metadata_t),
-    .Bypass(1'b0      )
+    .T      (metadata_t),
+    .Bypass (1'b0      )
   ) i_metadata_register (
-    .clk_i  (clk_i                                  ),
-    .rst_ni (rst_ni                                 ),
-    .valid_i(gnt_meta                               ),
-    .ready_o(meta_ready                             ),
-    .data_i (in_meta                                ),
-    .valid_o(meta_valid                             ),
-    .ready_i(pop_meta                               ),
-    .data_o (in_meta_o                              )
+    .clk_i  (clk_i     ),
+    .rst_ni (rst_ni    ),
+    .valid_i(gnt_meta  ),
+    .ready_o(meta_ready),
+    .data_i (in_meta   ),
+    .valid_o(meta_valid),
+    .ready_i(pop_meta  ),
+    .data_o (in_meta_o )
   );
 
   // Store response if it's not accepted immediately
@@ -160,22 +164,18 @@ module tcdm_adapter #(
   logic [DataWidth-1:0] in_wdata_q, in_wdata_d;
   logic [DataWidth-1:0] in_be_q, in_be_d;
 
+  logic [DataWidth-1:0] monitor_value_q, monitor_value_d;
+
   // In case of a SC we must forward SC result from the cycle earlier.
-  assign out_rdata = sc_active ?
-                     !sc_successful_q :
-                     (successor_update_q ? tail_data_q : out_rdata_i);
+  // TODO: only register the node_idx instead of tail_data_q
+  assign out_rdata = sc_active_q ? !sc_successful_q :
+                     (successor_update_q ? tail_data_q :
+                      (send_monitor ? monitor_value_q :
+                       out_rdata_i));
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
-  assign in_valid_o = meta_valid && rdata_valid;
-
-  // Only pop the data from the registers once both registers are ready
-  assign pop_resp   = in_ready_i && in_valid_o;
-  // meta data should be discarded after WakeUpReq came in
-  assign pop_meta   = pop_resp || discard_meta;
-
-  assign out_gnt_d = (out_req_o && !out_write_o) || sc_successful_d ||
-                     successor_update_d || (lrwait_active_q);
+  assign in_valid_o = meta_valid && rdata_valid && (colibri_state_q == Idle);
 
   // Generate out_gnt_q one cycle after sending read request to the bank
   `FF(out_gnt_q, out_gnt_d, 1'b0, clk_i, rst_ni);
@@ -183,23 +183,20 @@ module tcdm_adapter #(
   // Or the signal from SC and SCWait
   if (LrWaitEnable || LrScEnable) begin
     assign sc_successful_d = sc_lrsc_successful_d || sc_lrwait_successful_d;
+    assign sc_active_d = in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC) ||
+                         (colibri_state_q == DoSCWait);
     // indicate that an SCWait is active
-    `FF(sc_active,
-        in_valid_i && in_ready_o && (amo_op_t'(in_amo_i) == AMOSC) ||
-        scwait_active_q,
-        1'b0, clk_i, rst_ni);
+    `FF(sc_active_q, sc_active_d, 1'b0, clk_i, rst_ni);
     `FF(sc_successful_q, sc_successful_d, 1'b0, clk_i, rst_ni);
   end else begin
-    assign sc_active = 1'b0;
+    assign sc_active_q = 1'b0;
     assign sc_successful_d = 1'b0;
   end
 
-  // ----------------
-  // LRWait/SCWait
-  // ----------------
-
+  // -------------------
+  // LRWait/SCWait/MWait
+  // -------------------
   if (LrWaitEnable) begin : gen_lrwait
-
     // the reservation structure builds up a MCS queue in hardware with the
     // tail node in front of the TCDM bank. The nodes pointing to a successor
     // are located in front of the core issuing a LRWait
@@ -207,9 +204,11 @@ module tcdm_adapter #(
     // from succeeding
     typedef struct packed {
       // needed to prevent rogue SCWaits from succeeding
-      logic        head_valid;
+      logic                 head_valid;
       // indicate if tail points to a real core
-      logic        tail_valid;
+      logic                 tail_valid;
+      // Is is a monitor or an LRWait reservation?
+      logic                 is_mwait;
       // addr of reservation
       logic [AddrWidth-1:0] addr;
       // head of queue who can issue successful SCWaits
@@ -220,17 +219,17 @@ module tcdm_adapter #(
     queue_reservation_t [NumLrWaitAddr-1:0] lrwait_reservation_d, lrwait_reservation_q;
 
     `FF(lrwait_reservation_q, lrwait_reservation_d, 1'b0, clk_i, rst_ni);
-
-    `FF(lrwait_active_q, lrwait_active_d, 1'b0, clk_i, rst_ni);
-    `FF(scwait_active_q, scwait_active_d, 1'b0, clk_i, rst_ni);
-
-    // signal to indicate if write occurred
-    `FF(write_occurred_q, write_occurred_d, 1'b0, clk_i, rst_ni);
+    `FF(colibri_state_q, colibri_state_d, ColibriIdle, clk_i, rst_ni);
 
     // register inputs if LRWait/SCWait active
     `FF(in_address_q, in_address_d, 1'b0, clk_i, rst_ni);
     `FF(in_wdata_q, in_wdata_d, 1'b0, clk_i, rst_ni);
     `FF(in_be_q, in_be_d, 1'b0, clk_i, rst_ni);
+
+    // signal to indicate if write occurred
+    `FF(write_occurred_q, write_occurred_d, 1'b0, clk_i, rst_ni);
+    `FF(monitor_triggered_q, monitor_triggered_d, 1'b0, clk_i, rst_ni);
+    `FF(monitor_value_q, monitor_value_d, 1'b0, clk_i, rst_ni);
 
     `FF(successor_update_q, successor_update_d, 1'b0, clk_i, rst_ni);
     // TODO: can we directly use lrwait_reservation_q[node_idx].tail?
@@ -243,19 +242,38 @@ module tcdm_adapter #(
     localparam int unsigned NodeIdxWidth = $clog2(NumLrWaitAddr);
 
     logic                    all_nodes_full;
-    logic                    addr_match;
+    logic                    lrwait_addr_match;
+    logic                    monitor_addr_match;
+
     logic [NodeIdxWidth-1:0] node_idx;
+    logic [NodeIdxWidth-1:0] node_idx_d, node_idx_q;
+    `FF(node_idx_q, node_idx_d, 1'b0, clk_i, rst_ni);
+
+    logic [NodeIdxWidth-1:0] monitor_node_idx;
 
     // get index of reservation node that has same address as request
     if (NumLrWaitAddr > 1) begin : gen_multip_lrwait_nodes
-      logic [NumLrWaitAddr-1:0] idx_matches_addr;
+      logic [NumLrWaitAddr-1:0] lrwait_idx_matches_addr;
+      logic [NumLrWaitAddr-1:0] monitor_idx_matches_addr;
       logic [NumLrWaitAddr-1:0] node_is_free;
-      logic [NumLrWaitAddr-1:0] node_is_available;
+      logic [NumLrWaitAddr-1:0] lrwait_node_is_available;
+      logic [NumLrWaitAddr-1:0] monitor_node_is_available;
 
       for (genvar a = 0; a < NumLrWaitAddr; a++) begin
-        assign idx_matches_addr[a] = (lrwait_active_q || scwait_active_q || write_occurred_q)
-                                     && (lrwait_reservation_q[a].addr == in_address_q)
-                                       && (lrwait_reservation_q[a].tail_valid);
+        // addresse matches if the request is from Colibri and the reservation
+        // is a monitor reservation for MWait or a normal reservation for either
+        // SCWait or LRWait
+        assign lrwait_idx_matches_addr[a] = ((colibri_state_q == DoLRWait) ||
+                                              (colibri_state_q == DoSCWait) ||
+                                              (write_occurred_q == 1'b1)) &&
+                                             (lrwait_reservation_q[a].is_mwait == 1'b0) &&
+                                             (lrwait_reservation_q[a].addr == in_address_q) &&
+                                             (lrwait_reservation_q[a].tail_valid);
+        assign monitor_idx_matches_addr[a] = ((colibri_state_q == DoMWait) ||
+                                              (write_occurred_q == 1'b1)) &&
+                                             (lrwait_reservation_q[a].is_mwait == 1'b1) &&
+                                             (lrwait_reservation_q[a].addr == in_address_q) &&
+                                             (lrwait_reservation_q[a].tail_valid);
         assign node_is_free[a] = !lrwait_reservation_q[a].tail_valid;
       end
 
@@ -263,26 +281,38 @@ module tcdm_adapter #(
       assign all_nodes_full = ~|(node_is_free);
 
       // addr match means we can pick an existing node
-      assign addr_match = |idx_matches_addr;
+      assign lrwait_addr_match  = |lrwait_idx_matches_addr;
+      assign monitor_addr_match = |monitor_idx_matches_addr;
 
       // pick an existing node or one that is free
-      assign node_is_available = addr_match ? idx_matches_addr : node_is_free;
+      assign lrwait_node_is_available  = lrwait_addr_match ? lrwait_idx_matches_addr : node_is_free;
+      assign monitor_node_is_available = monitor_addr_match ? monitor_idx_matches_addr : node_is_free;
 
       // find free index for address
       // Find the first free index
       lzc #(
         .WIDTH ( NumLrWaitAddr ),
         .MODE  ( 0             ) // Start at index 0.
-      ) i_ld_free_lzc (
-        .in_i    ( node_is_available),
-        .cnt_o   ( node_idx         ),
-        .empty_o ( /*unused*/       )
+      ) i_ld_lrwait_free_lzc (
+        .in_i    (lrwait_node_is_available),
+        .cnt_o   (node_idx                ),
+        .empty_o (/*unused*/              )
+      );
+      lzc #(
+        .WIDTH   ( NumLrWaitAddr ),
+        .MODE    ( 0             ) // Start at index 0.
+      ) i_ld_monitor_free_lzc (
+        .in_i    (monitor_node_is_available),
+        .cnt_o   (monitor_node_idx         ),
+        .empty_o (/*unused*/               )
       );
 
     end else begin : single_lrwait_node // block: gen_multip_lrwait_nodes
-      assign node_idx       = 1'b0;
-      assign all_nodes_full = 1'b0;
-      assign addr_match     = 1'b1;
+      assign node_idx            = 1'b0;
+      assign monitor_node_idx    = 1'b0;
+      assign all_nodes_full      = 1'b0;
+      assign lrwait_addr_match   = 1'b1;
+      assign monitor_addr_match  = 1'b1;
     end
 
     // ----------------------------
@@ -292,140 +322,307 @@ module tcdm_adapter #(
     always_comb begin
 
       lrwait_reservation_d = lrwait_reservation_q;
-
-      successor_update_d = 1'b0;
+      colibri_state_d = colibri_state_q;
 
       sc_lrwait_successful_d = 1'b0;
 
-      lrwait_active_d = lrwait_active_q;
-      scwait_active_d = scwait_active_q;
+      in_address_d = in_address_q;
+      in_wdata_d   = in_wdata_q;
+      in_be_d      = in_be_q;
+      node_idx_d   = node_idx_q;
 
-      in_address_d     = in_address_q;
-      in_wdata_d       = in_wdata_q;
-      in_be_d          = in_be_q;
-      write_occurred_d = 1'b0;
-
-      discard_meta = 1'b0;
+      successor_update_d  = 1'b0;
+      write_occurred_d    = 1'b0;
+      monitor_triggered_d = monitor_triggered_q;
+      send_monitor        = 1'b0;
+      monitor_value_d     = monitor_value_q;
 
       in_meta = in_meta_i;
-      gnt_meta = (in_valid_i && in_ready_o && !in_write_i);
+
+      gnt_meta = in_valid_i && in_ready_o && !in_write_i;
+      // Only pop the data from the registers once both registers are ready
+      pop_resp   = (in_ready_i && in_valid_o);
+      // meta data should be discarded after WakeUpReq came in
+      pop_meta   = pop_resp;
+      out_gnt_d = (out_req_o && !out_write_o) || sc_successful_d;
 
       tail_data_d = tail_data_q;
 
-      // set signals to indicate that request arrived
-      if (in_valid_i && in_ready_o) begin
-        // a request arrived, if it is a LRWAIT or SCWAIT register everything
-        in_address_d = in_address_i;
-        in_wdata_d   = in_wdata_i;
-        in_be_d      = in_be_i;
-        if ((amo_op_t'(in_amo_i) == LRWAIT)) begin
-          lrwait_active_d = 1'b1;
-        end else if ((amo_op_t'(in_amo_i) == SCWAIT)) begin
-          scwait_active_d = 1'b1;
-        end else if ((out_write_o == 1'b1)) begin
-          write_occurred_d = 1'b1;
-        end else begin
-          // if no interesting signal, we do not need to register
-          in_address_d = in_address_q;
-          in_wdata_d   = in_wdata_q;
-          in_be_d      = in_be_q;
-        end
-      end
-
-      if (lrwait_active_q == 1'b1) begin
-        lrwait_active_d = 1'b0;
-        // if an LRWait, check if we have space for new reservation
-        // or if there was a match
-        if (!(all_nodes_full) || addr_match) begin
-          if(in_meta_o.lrwait == 1'b1) begin
-            // The lrwait flag is set, the LRReq that arrived is
-            // a WakeUpReq from a Qnode
-            // We discard the previous meta registered in
-            // meta register and use the metadata received from the
-            // WakeUpReq
-            discard_meta = 1'b1;
-
-            // We need to set the incoming metadata as head
-            // such that a SC can succeed afterwards
-            lrwait_reservation_d[node_idx].head_valid  = 1'b1;
-            lrwait_reservation_d[node_idx].head        = in_wdata_q;
-            lrwait_reservation_d[node_idx].head.lrwait = 1'b0;
-
-            in_meta  = in_wdata_q;
-            gnt_meta = 1'b1;
-
-            // it is a normal LRWait
-          end else if ((lrwait_reservation_q[node_idx].tail_valid == 1'b1)) begin
-            // A LRWait request arrived but the tail is already occupied
-            // We prepare a successor update for the Core currently in the
-            // tail node and replace the tail node with the metadata from the
-            // incoming request
-
-            // set as tail node
-            lrwait_reservation_d[node_idx].tail = in_meta_o;
-            tail_data_d = in_meta_o;
-            discard_meta = 1'b1;
-
-            // We raise this flag to prevent a request from being issued
-            // on the SRAM
-            successor_update_d = 1'b1;
-            in_meta            = lrwait_reservation_q[node_idx].tail;
-            in_meta.lrwait     = 1'b1;
-
-            gnt_meta           = 1'b1;
-
-          end else begin
-            // There is no valid tail node, the queue is empty
-            // The core can set himself as head and tail node
-            lrwait_reservation_d[node_idx].tail        = in_meta_o;
-            lrwait_reservation_d[node_idx].tail_valid  = 1'b1;
-            lrwait_reservation_d[node_idx].tail.lrwait = 1'b0;
-            lrwait_reservation_d[node_idx].head        = in_meta_o;
-            lrwait_reservation_d[node_idx].head.lrwait = 1'b0;
-            lrwait_reservation_d[node_idx].head_valid  = 1'b1;
-
-            lrwait_reservation_d[node_idx].addr        = in_address_q;
-          end
-        end
-      end // if (lrwait_active_q == 1'b1)
-
-      if (scwait_active_q == 1'b1) begin
-        scwait_active_d = 1'b0;
-
-        if (addr_match) begin
-          // make sure we only match on metadata identifying core
-          if ((in_meta_o.ini_addr == lrwait_reservation_q[node_idx].head.ini_addr) &&
-              (in_meta_o.tile_id  == lrwait_reservation_q[node_idx].head.tile_id) &&
-              (in_meta_o.core_id  == lrwait_reservation_q[node_idx].head.core_id)) begin
-            // if head is invalid, a write or amo invalidated reservation
-            if (lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
-
-              // the metadata matches the entry in the head node
-              // thus the SC comes from the same core as the LR
-              // we do not need to check the address since we
-              // already check that with the node_idx
-              sc_lrwait_successful_d = 1'b1;
-
-              // We set the head to invalid s.t. only one SC can occur
-              lrwait_reservation_d[node_idx].head_valid = 1'b0;
-            end
-
-            // if head and tail match, it was the only node in the queue
-            // and no successor update can arrive
-            if (lrwait_reservation_q[node_idx].head ==
-                lrwait_reservation_q[node_idx].tail) begin
-              lrwait_reservation_d[node_idx].tail_valid = 1'b0;
+      unique case (colibri_state_q)
+        ColibriIdle: begin
+          if (monitor_triggered_q == 1'b1 && ((in_valid_o == 1'b0)||
+                                              (in_ready_i && in_valid_o)) ) begin
+            // going to triggered monitor state has priority
+            colibri_state_d = MonitorTriggered;
+          end else if (in_valid_i && in_ready_o) begin
+            // go to corresponding state after an interesting signal arrived
+            // a request arrived, if it is a LRWAIT or SCWAIT register everything
+            in_address_d = in_address_i;
+            in_wdata_d   = in_wdata_i;
+            in_be_d      = in_be_i;
+            if ((amo_op_t'(in_amo_i) == LRWAIT)) begin
+              colibri_state_d = DoLRWait;
+            end else if ((amo_op_t'(in_amo_i) == SCWAIT)) begin
+              colibri_state_d = DoSCWait;
+            end else if ((amo_op_t'(in_amo_i) == MWAIT)) begin
+              colibri_state_d = DoMWait;
+              out_gnt_d = 1'b1;
+            end else if (((out_write_o == 1'b1) &&
+                          (out_req_o == 1'b1) &&
+                          (amo_op_t'(in_amo_i) == AMONone)) ||
+                         (!(amo_op_t'(in_amo_i)
+             inside {AMONone, LRWAIT, SCWAIT, MWAIT}))) begin
+              // we want an indication if a plain write happens or an AMO happens
+              // due to the combinatorial overhead, we need the write_occured a cycle
+              // earlier for AMOs
+              // LR and SC do not have an additional latency, so they are not included here
+              write_occurred_d = 1'b1;
+            end else begin
+              // if no interesting signal, we do not need to register
+              in_address_d = in_address_q;
+              in_wdata_d   = in_wdata_q;
+              in_be_d      = in_be_q;
             end
           end
-        end
-      end // if (scwait_active_q == 1'b1)
+        end // case: ColibriIdle
 
+        DoLRWait: begin
+          colibri_state_d = ColibriIdle;
+          out_gnt_d = 1'b1;
+          // if an LRWait, check if we have space for new reservation
+          // or if there was a match
+          if (!(all_nodes_full) || lrwait_addr_match) begin
+            if(in_meta_o.lrwait == 1'b1) begin
+              // The lrwait flag is set, the LRReq that arrived is
+              // a WakeUpReq from a Qnode
+              // We discard the previous meta registered in
+              // meta register and use the metadata received from the
+              // WakeUpReq
+              pop_meta = 1'b1;
+
+              // We need to set the incoming metadata as head
+              // such that a SC can succeed afterwards
+              lrwait_reservation_d[node_idx].head_valid  = 1'b1;
+              lrwait_reservation_d[node_idx].head        = in_wdata_q;
+              lrwait_reservation_d[node_idx].head.lrwait = 1'b0;
+
+              in_meta  = in_wdata_q;
+              gnt_meta = 1'b1;
+
+              // it is a normal LRWait
+            end else if ((lrwait_reservation_q[node_idx].tail_valid == 1'b1)) begin
+              // A LRWait request arrived but the tail is already occupied
+              // We prepare a successor update for the Core currently in the
+              // tail node and replace the tail node with the metadata from the
+              // incoming request
+
+              // set as tail node
+              lrwait_reservation_d[node_idx].tail = in_meta_o;
+              tail_data_d = in_meta_o;
+              pop_meta = 1'b1;
+
+              // We raise this flag to prevent a request from being issued
+              // on the SRAM
+              successor_update_d = 1'b1;
+              in_meta            = lrwait_reservation_q[node_idx].tail;
+              in_meta.lrwait     = 1'b1;
+
+              gnt_meta           = 1'b1;
+
+            end else begin
+              // There is no valid tail node, the queue is empty
+              // The core can set himself as head and tail node
+              lrwait_reservation_d[node_idx].tail        = in_meta_o;
+              lrwait_reservation_d[node_idx].tail_valid  = 1'b1;
+              lrwait_reservation_d[node_idx].tail.lrwait = 1'b0;
+              lrwait_reservation_d[node_idx].head        = in_meta_o;
+              lrwait_reservation_d[node_idx].head.lrwait = 1'b0;
+              lrwait_reservation_d[node_idx].head_valid  = 1'b1;
+
+              lrwait_reservation_d[node_idx].addr        = in_address_q;
+
+              lrwait_reservation_d[node_idx].is_mwait = 1'b0;
+            end
+          end // if (!(all_nodes_full) || lrwait_addr_match)
+        end // case: DoLRWait
+
+        DoSCWait: begin
+          colibri_state_d = ColibriIdle;
+          out_gnt_d = 1'b1;
+
+          if (lrwait_addr_match) begin
+            // make sure we only match on metadata identifying core
+            if ((in_meta_o.ini_addr == lrwait_reservation_q[node_idx].head.ini_addr) &&
+                (in_meta_o.tile_id  == lrwait_reservation_q[node_idx].head.tile_id) &&
+                (in_meta_o.core_id  == lrwait_reservation_q[node_idx].head.core_id)) begin
+              // if head is invalid, a write or amo invalidated reservation
+              if (lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
+
+                // the metadata matches the entry in the head node
+                // thus the SC comes from the same core as the LR
+                // we do not need to check the address since we
+                // already check that with the node_idx
+                sc_lrwait_successful_d = 1'b1;
+
+                // We set the head to invalid s.t. only one SC can occur
+                lrwait_reservation_d[node_idx].head_valid = 1'b0;
+
+                // check if we trigger monitor
+                if (monitor_addr_match) begin
+                  if (lrwait_reservation_q[monitor_node_idx].is_mwait == 1'b1 &&
+                      lrwait_reservation_q[monitor_node_idx].head_valid == 1'b1) begin
+                    // write occurred on monitored reservation, dispatch monitoring
+                    // updates if head is still valid
+
+                    // head invalid indicates a WakeUp req is already in-flight and
+                    // we do not need to trigger an additional WakeUp chain
+                    monitor_triggered_d = 1'b1;
+                  end
+                end
+              end
+
+              // if head and tail match, it was the only node in the queue
+              // and no successor update can arrive
+              if (lrwait_reservation_q[node_idx].head ==
+                  lrwait_reservation_q[node_idx].tail) begin
+                lrwait_reservation_d[node_idx].tail_valid = 1'b0;
+              end
+            end
+          end
+        end // case: DoSCWait
+
+        MonitorTriggered: begin
+          colibri_state_d = ColibriIdle;
+          if (monitor_triggered_q == 1'b1)begin
+            if (lrwait_reservation_q[node_idx_q].head_valid == 1'b1) begin
+              // we only reset the triggered flag here
+              monitor_triggered_d = 1'b0;
+              send_monitor = 1'b1;
+              // we can trigger a monitor queue update since the head
+              // is still valid, this indicates that no other WakeUp is
+              // in progress
+              // TODO: the if clause is checked twice
+              in_meta  = lrwait_reservation_q[node_idx_q].head;
+              gnt_meta = 1'b1;
+
+              lrwait_reservation_d[node_idx_q].head_valid = 1'b0;
+              if (lrwait_reservation_q[node_idx_q].tail ==
+                  lrwait_reservation_q[node_idx_q].head) begin
+                // the core was the only one in the queue
+                // we can set the tail to invalid
+                lrwait_reservation_d[node_idx_q].tail_valid = 1'b0;
+              end
+            end
+          end
+        end
+
+        DoMWait: begin
+          colibri_state_d = ColibriIdle;
+
+          // first check if we have space for a reservation, else we
+          // just return the value located in the memory
+          if (!(all_nodes_full) || monitor_addr_match) begin
+            if(in_meta_o.lrwait == 1'b1) begin
+              // A WakeUp req arrived
+
+              // We discard the previous meta registered in
+              // meta register and use the metadata received from the
+              // WakeUpReq
+              pop_meta = 1'b1;
+
+              // We need to set the incoming metadata as head
+              lrwait_reservation_d[monitor_node_idx].head_valid  = 1'b0;
+              lrwait_reservation_d[monitor_node_idx].head        = in_wdata_q;
+              lrwait_reservation_d[monitor_node_idx].head.lrwait = 1'b0;
+
+              in_meta  = in_wdata_q;
+              // allow new meta to be loaded into metaregister
+              gnt_meta = 1'b1;
+
+              if (in_meta == lrwait_reservation_q[monitor_node_idx].tail) begin
+                // the core was the last one in the queue
+                // we can set the tail to invalid
+                lrwait_reservation_d[monitor_node_idx].tail_valid = 1'b0;
+              end
+            end else if(in_wdata_q != out_rdata_i) begin
+              // the value is already different from our expectation
+              // we do not need to place a reservation and can directly
+              // dispatch a MWait answer
+            end else if ((lrwait_reservation_q[monitor_node_idx].tail_valid == 1'b1)) begin
+              // A MWait request arrived but the tail is already occupied
+              // We prepare a successor update for the Core currently in the
+              // tail node and replace the tail node with the metadata from the
+              // incoming request
+
+              // set as tail node
+              lrwait_reservation_d[monitor_node_idx].tail = in_meta_o;
+              tail_data_d = in_meta_o;
+              pop_meta = 1'b1;
+              pop_resp = 1'b1;
+
+              out_gnt_d = 1'b1;
+
+              // We raise this flag to prevent a request from being issued
+              // on the SRAM
+              successor_update_d = 1'b1;
+              in_meta            = lrwait_reservation_q[monitor_node_idx].tail;
+              in_meta.lrwait     = 1'b1;
+
+              gnt_meta           = 1'b1;
+            end else begin
+              // There is no valid tail node, the queue is empty
+              // and the value from memory matches the expectation
+              // thus we want to wait for it to change
+
+              // The core can set himself as head and tail node
+              lrwait_reservation_d[monitor_node_idx].tail        = in_meta_o;
+              lrwait_reservation_d[monitor_node_idx].tail_valid  = 1'b1;
+              lrwait_reservation_d[monitor_node_idx].tail.lrwait = 1'b0;
+              lrwait_reservation_d[monitor_node_idx].head        = in_meta_o;
+              lrwait_reservation_d[monitor_node_idx].head.lrwait = 1'b0;
+              lrwait_reservation_d[monitor_node_idx].head_valid  = 1'b1;
+
+              lrwait_reservation_d[monitor_node_idx].addr        = in_address_q;
+
+              lrwait_reservation_d[monitor_node_idx].is_mwait    = 1'b1;
+
+              // we do not want to send out any response
+              pop_meta = 1'b1;
+              pop_resp = 1'b1;
+            end
+          end
+        end // case: DoMWait
+      endcase // unique case (colibri_state_q)
+
+      // Handle reservation when a write occured in previous cycle
+      // This is not a separate ColibriState since we want to continue
+      // with normal operation
       if (write_occurred_q == 1'b1) begin
-        if (addr_match) begin
+        if (monitor_addr_match) begin
           // a write occurred to a reserved location
-          // we invalidate the head of the queue
-          lrwait_reservation_d[node_idx].head_valid = 1'b0;
+          if (lrwait_reservation_d[monitor_node_idx].is_mwait == 1'b1 &&
+              lrwait_reservation_d[monitor_node_idx].head_valid == 1'b1) begin
+            // write occurred on monitored reservation, dispatch monitoring
+            // updates if head is still valid
 
+            // head invalid indicates a WakeUp req is already in-flight and
+            // we do not need to trigger an additional WakeUp chain
+            monitor_triggered_d = 1'b1;
+            monitor_value_d = in_wdata_q;
+
+            // we need to wait until old monitor wait is dispatched
+            // and other request has passed
+            if (monitor_triggered_q == 1'b0 && colibri_state_d == Idle) begin
+              colibri_state_d = MonitorTriggered;
+              out_gnt_d       = 1'b1;
+            end
+            node_idx_d          = monitor_node_idx;
+          end
+        end
+
+        if (lrwait_addr_match) begin
+          // we invalidate the head of the queue if it is a LRWait reservation
+          lrwait_reservation_d[node_idx].head_valid = 1'b0;
           // if there is only one node in the queue, we discard
           // the reservation completely
           if (lrwait_reservation_q[node_idx].head ==
@@ -433,23 +630,28 @@ module tcdm_adapter #(
             // if head and tail match, it was the only node in the queue
             lrwait_reservation_d[node_idx].tail_valid = 1'b0;
           end
-
           // indicate that a reservation has been overwritten to the user
-          if (lrwait_reservation_q[node_idx].head_valid == 1'b1) begin
+          if ((lrwait_reservation_q[node_idx].head_valid == 1'b1) &&
+              lrwait_reservation_q[node_idx].is_mwait == 1'b0) begin
             $warning ("A write occurred to a reserved location.");
           end
         end
-      end // if (write_occurred_q == 1'b1)
-
+      end
     end // always_comb
   end else begin: disable_lrwait // block: gen_lrwait
     assign sc_lrwait_successful_d = 1'b0;
     assign successor_update_d     = 1'b0;
 
-    assign lrwait_active_d        = 1'b0;
-    assign scwait_active_d        = 1'b0;
-    assign lrwait_active_q        = 1'b0;
-    assign scwait_active_q        = 1'b0;
+    assign gnt_meta = in_valid_i && in_ready_o;
+    // Only pop the data from the registers once both registers are ready
+    assign pop_resp   = (in_ready_i && in_valid_o);
+    // meta data should be discarded after WakeUpReq came in
+    assign pop_meta   = pop_resp;
+    assign out_gnt_d = (out_req_o && !out_write_o) ||
+                       sc_successful_d;
+
+    assign colibri_state_d        = ColibriIdle;
+    assign colibri_state_q        = ColibriIdle;
 
     assign in_address_q           = in_address_i;
     assign in_wdata_q             = in_wdata_i;
@@ -506,7 +708,6 @@ module tcdm_adapter #(
 
       // new valid transaction
       if (in_valid_i && in_ready_o) begin
-
         // An SC can only pair with the most recent LR in program order.
         // Place a reservation on the address if there isn't already a valid reservation.
         // We prevent a live-lock by don't throwing away the reservation of a hart unless
@@ -526,7 +727,8 @@ module tcdm_adapter #(
         // check whether another request broke the reservation
         // by either issuing an AMO or doing a SCWait on the same location
         if ((in_address_i == lrsc_reservation_q.addr) &&
-            (!(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC, LRWAIT, SCWAIT})
+            (!(amo_op_t'(in_amo_i)
+               inside {AMONone, AMOLR, AMOSC, LRWAIT, SCWAIT, MWAIT})
              || in_write_i ||
              (amo_op_t'(in_amo_i) ==  SCWAIT) && sc_lrwait_successful_d)) begin
           lrsc_reservation_d.valid = 1'b0;
@@ -537,6 +739,22 @@ module tcdm_adapter #(
             && lrsc_reservation_q.core == unique_core_id) begin
           lrsc_reservation_d.valid = 1'b0;
           sc_lrsc_successful_d = (lrsc_reservation_q.addr == in_address_i);
+          // This should be handled by read functionality
+          // if(sc_lrsc_successful_d) begin
+          //   // check if we trigger monitor
+          //   if (monitor_addr_match) begin
+          //     if (lrwait_reservation_d[monitor_node_idx].is_mwait == 1'b1 &&
+          //         lrwait_reservation_d[monitor_node_idx].head_valid == 1'b1) begin
+          //       // write occurred on monitored reservation, dispatch monitoring
+          //       // updates if head is still valid
+
+          //       // head invalid indicates a WakeUp req is already in-flight and
+          //       // we do not need to trigger an additional WakeUp chain
+          //       monitor_triggered_d = 1'b1;
+          //       node_idx_d          = monitor_node_idx;
+          //     end
+          //   end // if (monitor_addr_match)
+          // end // if (sc_lrsc_successful_d)
         end
       end
     end // always_comb
@@ -554,34 +772,59 @@ module tcdm_adapter #(
     out_req_o   = in_valid_i && in_ready_o;
 
     // block requests on memory during lrwait or scwait
-    if (lrwait_active_q || scwait_active_q) begin
+    // and issue the request a cycle later
+    if ((colibri_state_q != ColibriIdle)) begin
+      // block new requests from getting accepted
       in_ready_o = 1'b0;
-      out_req_o = 1'b1;
-    end else if (lrwait_active_d || scwait_active_d) begin
+      // only delay the request on SRAM  when we are doing LRWait or SCWait
+      // since we need the value of the memory for MWait
+      if ((colibri_state_q == DoLRWait) ||
+          (colibri_state_q == DoSCWait)) begin
+        out_req_o = 1'b1;
+      end else begin
+        out_req_o = 1'b0;
+      end
+    end else if ((colibri_state_d == DoLRWait) ||
+                 (colibri_state_d == DoSCWait)) begin
       out_req_o = 1'b0;
+    end else if (colibri_state_d == DoMWait ||
+                 colibri_state_d == MonitorTriggered) begin
+      // monitor always needs a memory value and needs
+      // value a cycle earlier
+      out_req_o = 1'b1;
+    end
+    if (monitor_triggered_q == 1'b1) begin
+      in_ready_o = 1'b0;
+    end
+    if (write_triggered_q == 1'b1) begin
+      in_ready_o = 1'b0;
     end
 
-    out_add_o   = (lrwait_active_q || scwait_active_q) ? in_address_q : in_address_i;
-    out_write_o = (lrwait_active_q || scwait_active_q) ?
+    out_add_o   = (colibri_state_q != ColibriIdle) ?
+                  in_address_q : in_address_i;
+    out_write_o = (colibri_state_q != ColibriIdle) ?
                   sc_successful_d : (in_write_i || sc_successful_d);
-    out_wdata_o = (lrwait_active_q || scwait_active_q) ? in_wdata_q : in_wdata_i;
-    out_be_o    = (lrwait_active_q || scwait_active_q) ? in_be_q : in_be_i;
+    out_wdata_o = (colibri_state_q != ColibriIdle) ?
+                  in_wdata_q : in_wdata_i;
+    out_be_o    = (colibri_state_q != ColibriIdle) ?
+                  in_be_q : in_be_i;
 
-    state_d     = state_q;
+    amo_state_d = amo_state_q;
     load_amo    = 1'b0;
 
-    unique case (state_q)
+    unique case (amo_state_q)
       Idle: begin
         if(in_valid_i && in_ready_o &&
-           !(amo_op_t'(in_amo_i) inside {AMONone, AMOLR, AMOSC, LRWAIT, SCWAIT})) begin
-          load_amo = 1'b1;
-          state_d = DoAMO;
+           !(amo_op_t'(in_amo_i)
+             inside {AMONone, AMOLR, AMOSC, LRWAIT, SCWAIT, MWAIT})) begin
+          load_amo    = 1'b1;
+          amo_state_d = DoAMO;
         end
       end
       // Claim the memory interface
       DoAMO, WriteBackAMO: begin
         in_ready_o  = 1'b0;
-        state_d     = (RegisterAmo && state_q != WriteBackAMO) ?  WriteBackAMO : Idle;
+        amo_state_d = (RegisterAmo && amo_state_q != WriteBackAMO) ?  WriteBackAMO : Idle;
         // Commit AMO
         out_req_o   = 1'b1;
         out_write_o = 1'b1;
@@ -599,19 +842,19 @@ module tcdm_adapter #(
   end
 
   if (RegisterAmo) begin : gen_amo_slice
-    `FFLNR(amo_result_q, amo_result, (state_q == DoAMO), clk_i)
+    `FFLNR(amo_result_q, amo_result, (amo_state_q == DoAMO), clk_i)
   end else begin : gen_amo_slice
     assign amo_result_q = '0;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      state_q         <= Idle;
+      amo_state_q     <= Idle;
       amo_op_q        <= amo_op_t'('0);
       addr_q          <= '0;
       amo_operand_b_q <= '0;
     end else begin
-      state_q         <= state_d;
+      amo_state_q       <= amo_state_d;
       if (load_amo) begin
         amo_op_q        <= amo_op_t'(in_amo_i);
         addr_q          <= in_address_i;
@@ -673,8 +916,8 @@ module tcdm_adapter #(
     $error($sformatf("Module currently only supports DataWidth = 32. DataWidth is currently set to: %0d", DataWidth));
   end
 
-  if (NumLrWaitAddr < 1) begin
-    $error($sformatf("Invalid number of LrWaitAddr chose, has to be at least 1", NumLrWaitAddr));
+  if ((NumLrWaitAddr < 1) && (LrWaitEnable == 1'b1)) begin
+    $error($sformatf("Invalid number of LrWaitAddr chosen, has to be at least 1", NumLrWaitAddr));
   end
 
   `ifndef VERILATOR
@@ -682,7 +925,7 @@ module tcdm_adapter #(
       @(posedge clk_i) disable iff (~rst_ni) (out_gnt_q |-> rdata_ready))
       else $fatal (1, "Trying to push new data although the i_rdata_register is not ready.");
     meta_valid_not_asserted : assert property(
-      @(posedge clk_i) disable iff (~rst_ni) ((sc_active || successor_update_q)
+      @(posedge clk_i) disable iff (~rst_ni) ((sc_active_q || successor_update_q)
                                               |-> meta_valid))
       else $fatal (1, "Feeding metadata into out_rdata while it is not valid.");
 
