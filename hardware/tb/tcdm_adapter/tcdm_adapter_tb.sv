@@ -467,8 +467,8 @@ class Generator;
     }
     else {
       // rand_addr inside {1,2,3,4,5};
-      // rand_addr inside {1,2,3,4,5,6};
-      rand_addr inside {1,2};
+      rand_addr inside {1,2,3,4,5,6};
+
       // generate random data
       rand_data > 0;
       rand_data < 32000;
@@ -504,7 +504,7 @@ class Generator;
             // do not expect a response from write
             core_status = Active;
             // $display("Writing to monitored location to wake everybody up!");
-            #(1000*ClockPeriod);
+            #(10*ClockPeriod);
           end
         end
 
@@ -523,68 +523,80 @@ class Generator;
     // TODO store address during LR for subsequent LR
 
     wait((core_status == Active) || (core_status == DoSCNext));
+    if (core_index == 0) begin
+      // core 0 makes sure that every address is written from time to time so that
+      // monitors are triggered
+      if(!this.randomize()) begin
+        $display("Failed to randomize Generator class.");
+        $finish(1);
+      end
+      while(monitored_addresses.size() != 0) begin
+        write_memory(.addr(monitored_addresses.pop_front()),.data(rand_data),.core_id(core_index));
+        // do not expect a response from write
+        core_status = Active;
+        // $display("Writing to monitored location to wake everybody up!");
+        #(100*ClockPeriod);
+      end
+      #(100*ClockPeriod);
+    end else begin
+      unique case (core_status)
+        Active: begin
+          // get index for random instruction
+          random_draw = $urandom_range(REQUESTS_TESTED);
 
-    unique case (core_status)
-      Active: begin
-        // get index for random instruction
-        if (core_index == 0) begin
-          // don't let core 0 monitor addresses since he wakes everybody up
-          random_draw = $urandom_range(2);
-        end else begin
-          random_draw = $urandom_range(2);
+          // get random address and random number
+          if(!this.randomize()) begin
+            $display("Failed to randomize Generator class.");
+            $finish(1);
+          end
+          unique case (random_draw)
+            0: begin
+              write_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+              // do not expect a response from write
+              core_status = Active;
+            end
+            1: begin
+              read_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+              core_status = WaitForResp;
+            end
+            2: begin
+              amo_swap(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+              core_status = WaitForResp;
+            end
+            3: begin
+              load_reserved(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+              core_status = WaitForLRResp;
+            end
+            4: begin
+              monitor_wait(.addr(rand_addr),.data('1),.core_id(core_index));
+              monitored_addresses.push_back(rand_addr);
+              core_status = WaitForResp;
+            end
+            default: $display("invalid number drawn");
+          endcase // case (random_draw)
         end
-        // get random address and random number
-        if(!this.randomize()) begin
-          $display("Failed to randomize Generator class.");
-          $finish(1);
-        end
-        unique case (random_draw)
-          0: begin
-            write_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            // do not expect a response from write
-            core_status = Active;
-          end
-          1: begin
-            read_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            core_status = WaitForResp;
-          end
-          2: begin
-            amo_swap(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            core_status = WaitForResp;
-          end
-          3: begin
-            load_reserved(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            core_status = WaitForLRResp;
-          end
-          4: begin
-            monitor_wait(.addr(rand_addr),.data('1),.core_id(core_index));
-            monitored_addresses.push_back(rand_addr);
-            core_status = WaitForResp;
-          end
-          default: $display("invalid number drawn");
-        endcase // case (random_draw)
-      end
-      DoSCNext: begin
-        random_draw = $urandom_range(1);
+        DoSCNext: begin
+          random_draw = $urandom_range(1);
 
-        unique case (random_draw)
-          0: begin
-            // send store conditional
-            store_conditional(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            core_status = WaitForResp;
-          end
-          1: begin
-            write_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
-            // do not expect a response from write
-            core_status = DoSCNext;
-          end
-          default: $display("invalid number drawn");
-        endcase // case (random_draw)
-      end
-      default: begin
-        $display("Invalid core status");
-      end
-    endcase // unique case (core_status[core_index])
+          unique case (random_draw)
+            0: begin
+              // send store conditional
+              store_conditional(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+              core_status = WaitForResp;
+            end
+            1: begin
+              write_memory(.addr(rand_addr),.data(rand_data),.core_id(core_index));
+              // do not expect a response from write
+              core_status = DoSCNext;
+            end
+            default: $display("invalid number drawn");
+          endcase // case (random_draw)
+        end
+        default: begin
+          $display("Invalid core status");
+        end
+      endcase // unique case (core_status[core_index])
+    end
   endtask; // generate_random_request
 
 endclass : Generator
@@ -828,18 +840,39 @@ class GoldenTCDM;
    *
    */
 
-
-  // Golden Model for write access to TCDM
-  // Pop the reservation if one was available
-  // No response is expected
-  function void write_access(input bank_addr_t addr,
-                             input data_t data);
+  function void handle_monitor_reservation_of_address(input bank_addr_t addr,
+                                                      input data_t data);
     automatic int resp_core_id;
-    if (VERBOSE) begin
-      $display("write access addr %h ", addr);
+    if (monitor_queues.exists(addr) &&
+        monitor_queues[addr].size() != 0) begin
+      // a monitored value was changed
+      // release answer to first core
+      if (monitor_queues_valid[addr] == 1'b1) begin
+
+        resp_metadata = monitor_queues[addr][0];
+        resp_core_id = get_core_id_as_int(.meta(resp_metadata));
+
+        respdriver[resp_core_id].expected_data_resp.push_back(data);
+        respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
+        if(VERBOSE) begin
+          $display("write monitor update %h for core %d", data, resp_core_id);
+        end
+
+        // pop monitor reservation if it is the only one in the queue
+        if (monitor_queues[addr].size() == 1) begin
+          void'(monitor_queues[addr].pop_front());
+        end
+        monitor_queues_valid[addr] = 1'b0;
+      end else begin // if (monitor_queues_valid[addr] == 1'b1)
+        if(VERBOSE) begin
+          $display("Update was already triggered, do nothing");
+        end
+      end
     end
-    // add write access to mock memory
-    mock_memory[addr] = data;
+  endfunction
+  function void handle_lrwait_reservation_of_address(input bank_addr_t addr,
+                                                     input data_t data);
+    automatic int resp_core_id;
 
     // pop reservation from queue if reservation existed
     // for same address
@@ -855,31 +888,21 @@ class GoldenTCDM;
         void'(reservation_queues[addr].pop_front());
       end
     end // if (reservation_queues.exists(addr) &&...
+  endfunction // handle_reservation_of_address
 
-    if (monitor_queues.exists(addr) &&
-        monitor_queues[addr].size() != 0) begin
-      // a monitored value was changed
-      // release answer to first core
-      if (monitor_queues_valid[addr] == 1'b1) begin
-        $display("write monitor update %h", data);
-
-
-        resp_metadata = monitor_queues[addr][0];
-        resp_core_id = get_core_id_as_int(.meta(resp_metadata));
-
-        respdriver[resp_core_id].expected_data_resp.push_back(data);
-        respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
-
-        // pop monitor reservation if it is the only one in the queue
-        if (monitor_queues[addr].size() == 1) begin
-          void'(monitor_queues[addr].pop_front());
-        end
-        monitor_queues_valid[addr] = 1'b0;
-      end else begin
-        $display("Update was already triggered, do nothing");
-      end
+  // Golden Model for write access to TCDM
+  // Pop the reservation if one was available
+  // No response is expected
+  function void write_access(input bank_addr_t addr,
+                             input data_t data);
+    if (VERBOSE) begin
+      $display("write access addr %h ", addr);
     end
+    // add write access to mock memory
+    mock_memory[addr] = data;
 
+    handle_monitor_reservation_of_address(.addr(addr), .data(data));
+    handle_lrwait_reservation_of_address(.addr(addr), .data(data));
   endfunction; // write_access
 
   // Golden model for read access to TCDM
@@ -910,16 +933,20 @@ class GoldenTCDM;
     // read data from memory
     if (mock_memory.exists(addr)) begin
       resp_data = mock_memory[addr];
-      $display("amo swap value marc %h %h",resp_data, addr);
     end else begin
       resp_data = 32'hffffffff;
     end
     // write value from swap to mock memory
     mock_memory[addr] = data;
-    $display("amo swap value marc %h %h",resp_data, addr);
+    if(VERBOSE) begin
+      $display("amo swap value marc %h %h",resp_data, addr);
+    end
 
     respdriver[req_core_id].expected_data_resp.push_back(resp_data);
     respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
+
+    handle_monitor_reservation_of_address(.addr(addr), .data(data));
+    handle_lrwait_reservation_of_address(.addr(addr), .data(data));
   endfunction; // read_access
 
   // monitor_wait only returns a value if a value at memory location is
@@ -952,6 +979,9 @@ class GoldenTCDM;
       if ((current_queue_size < LrWaitQueueSize) &&
           (number_of_active_queues < NumLrWaitAddr)) begin
         // there is an empty queue node available
+        if(VERBOSE) begin
+          $display("There is a free space for a new queue");
+        end
         queue_is_full = 0;
       end else if (monitor_queues.exists(addr)) begin
         // all queue nodes are occupied, but an occupied node contains the same
@@ -959,6 +989,9 @@ class GoldenTCDM;
         if (monitor_queues[addr].size() == 0) begin
           queue_is_full = 1;
         end else begin
+          if(VERBOSE) begin
+            $display("Queue for address is already active");
+          end
           queue_is_full = 0;
         end
       end else begin
@@ -977,6 +1010,9 @@ class GoldenTCDM;
             monitor_queues_valid[addr] = 1'b1;
             monitor_queues[addr].push_back(metadata);
           end
+          if (VERBOSE) begin
+            $display("Push metadata to monitor queue");
+          end
           // Push metadata to monitoring queue
           monitor_queues[addr].push_back(metadata);
         end else begin // if (monitor_queues.exists(addr))
@@ -987,6 +1023,9 @@ class GoldenTCDM;
         end
       end else begin
         // queue is full, we immediately bounce back an update
+        if(VERBOSE) begin
+          $display("Queue is full, send update immediately");
+        end
         respdriver[req_core_id].expected_data_resp.push_back(resp_data);
         respdriver[req_core_id].expected_metadata_resp.push_back(metadata);
       end
@@ -1004,17 +1043,38 @@ class GoldenTCDM;
         if (VERBOSE) begin
           $display("monitor queue empty");
         end
+      end else begin
         void'(monitor_queues[addr].pop_front());
+
+        // the core sending the update was the second to last
+        // we sent the last update out and thus can pop the last
+        // element as well
+        if (monitor_queues[addr].size() == 1) begin
+          void'(monitor_queues[addr].pop_front());
+        end
+
 
         // infer sucessor from data sent by WakeUp
         resp_metadata = data;
         resp_core_id = get_core_id_as_int(.meta(resp_metadata));
+        if (mock_memory.exists(addr)) begin
+          resp_data = mock_memory[addr];
+        end else begin
+          resp_data = 32'hffffffff;
+        end
+
+        if(VERBOSE) begin
+          $display("monitor wake up from core %d for core %d with val %h",
+                   req_core_id,
+                   resp_core_id,
+                   resp_data);
+        end
 
         respdriver[resp_core_id].expected_data_resp.push_back(resp_data);
         respdriver[resp_core_id].expected_metadata_resp.push_back(resp_metadata);
-      end
+      end // else: !if(monitor_queues[addr].size() == 0)
     end else begin // if (monitor_queues.exists(addr))
-      $display("received WakeUp to an invalid location!");
+      $warning("received WakeUp to an invalid location!");
     end
 
   endfunction; // monitor_wait_wake_up
@@ -1024,11 +1084,16 @@ class GoldenTCDM;
     number_of_active_queues = 0;
     if (reservation_queues.first(check_size)) begin
       do begin
-        if (reservation_queues[check_size].size() >= 1 &&
-            reservation_queues_valid[check_size]) begin
+        // we count a queue as occupied if there is more than 1 entry
+        // or it is a valid and there is just a single entry
+        if (reservation_queues[check_size].size() > 1 ||
+            ((reservation_queues[check_size].size() == 1)
+            && reservation_queues_valid[check_size])) begin
           // there is a reservation queue for the current address
           number_of_active_queues += 1;
-          $display("lrwait queue for %h", check_size);
+          if(VERBOSE) begin
+            $display("lrwait queue for %h", check_size);
+          end
         end
         current_queue_size += reservation_queues[check_size].size();
       end while (reservation_queues.next(check_size));
@@ -1036,20 +1101,17 @@ class GoldenTCDM;
 
     if (monitor_queues.first(check_size)) begin
       do begin
-        if (monitor_queues[check_size].size() >= 1 &&
-            monitor_queues_valid[check_size]) begin
+        if (monitor_queues[check_size].size() >= 1) begin
           // there is a monitor queue for the current address
           number_of_active_queues += 1;
-          $display("monitor queue for %h", check_size);
+
+          if(VERBOSE) begin
+            $display("monitor queue for %h", check_size);
+          end
         end
         current_queue_size += monitor_queues[check_size].size();
       end while (monitor_queues.next(check_size));
     end // if (monitor_queues.first(check_size))
-
-    $display("number_of_active_queues %d", number_of_active_queues);
-    $display("current_queue_size %d", current_queue_size);
-
-
   endfunction; // get_current_active_queue_size
 
 
@@ -1129,7 +1191,9 @@ class GoldenTCDM;
           // the core was the only one in the queue and his head node has been
           // invalidated by a write or an SC occurred, the reservation can
           // be overwritten
-          $display("It happened!");
+          if (VERBOSE) begin
+            $display("Only reservation was overwritten by write, new reservation placed.");
+          end
 
           // pop the old reservation
           void'(reservation_queues[addr].pop_front());
@@ -1266,6 +1330,8 @@ class GoldenTCDM;
             if (VERBOSE) begin
               $display("store conditional succeeded");
             end
+
+            handle_monitor_reservation_of_address(.addr(addr), .data(data));
           end else begin
             // reservation was invalidated, SC failed
             respdriver[req_core_id].expected_data_resp.push_back(1'b1);

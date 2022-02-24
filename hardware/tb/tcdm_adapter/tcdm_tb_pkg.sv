@@ -24,6 +24,14 @@ package tcdm_tb_pkg;
   // randomize address and payloads for TCDM
   localparam logic FULL_RANDOM_TEST = 1;
 
+  // Which requests are tested?
+  // 0: Write
+  // 1: Write + Read
+  // 2: Write + Read + AMOSWAP
+  // 3: Write + Read + AMOSWAP + LRWAIT/SCWAIT
+  // 4: Write + Read + AMOSWAP + LRWAIT/SCWAIT + MWAIT
+  localparam int   REQUESTS_TESTED = 4;
+
   // print requests sent and received
   localparam logic VERBOSE          = 0;
   // if valid, delay raising of ready flag at output of TCDM adapter
