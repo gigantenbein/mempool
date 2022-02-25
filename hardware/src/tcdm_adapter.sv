@@ -123,8 +123,7 @@ module tcdm_adapter #(
   logic        successor_update_d, successor_update_q;
 
   logic        write_occurred_d, write_occurred_q;
-  logic        monitor_triggered_d, monitor_triggered_q;
-  logic        send_monitor;
+  logic        reservation_active_d, reservation_active_q;
 
   // Store the metadata at handshake
   spill_register #(
@@ -173,7 +172,7 @@ module tcdm_adapter #(
 
   // Ready to output data if both meta and read data
   // are available (the read data will always be last)
-  assign in_valid_o = meta_valid && rdata_valid && (colibri_state_q == Idle);
+  assign in_valid_o = meta_valid && rdata_valid && (colibri_state_q == ColibriIdle);
 
   // Generate out_gnt_q one cycle after sending read request to the bank
   `FF(out_gnt_q, out_gnt_d, 1'b0, clk_i, rst_ni);
@@ -249,6 +248,7 @@ module tcdm_adapter #(
       logic [NumLrWaitAddr-1:0] lrwait_idx_matches_addr;
       logic [NumLrWaitAddr-1:0] monitor_idx_matches_addr;
       logic [NumLrWaitAddr-1:0] node_is_free;
+      logic [NumLrWaitAddr-1:0] node_is_active;
       logic [NumLrWaitAddr-1:0] lrwait_node_is_available;
       logic [NumLrWaitAddr-1:0] monitor_node_is_available;
 
@@ -269,10 +269,14 @@ module tcdm_adapter #(
                                              (lrwait_reservation_q[a].addr == in_address_q) &&
                                              (lrwait_reservation_q[a].tail_valid);
         assign node_is_free[a] = !lrwait_reservation_q[a].tail_valid;
+        assign node_is_active[a] = lrwait_reservation_d[a].tail_valid;
       end
 
       // if no node is free, the LRWait queue is full
       assign all_nodes_full = ~|(node_is_free);
+
+      assign reservation_active_d = |node_is_active;
+      `FF(reservation_active_q, reservation_active_d, 1'b0, clk_i, rst_ni);
 
       // addr match means we can pick an existing node
       assign lrwait_addr_match  = |lrwait_idx_matches_addr;
@@ -449,19 +453,6 @@ module tcdm_adapter #(
 
                 // We set the head to invalid s.t. only one SC can occur
                 lrwait_reservation_d[lrwait_node_idx].head_valid = 1'b0;
-
-                // check if we trigger monitor
-                if (monitor_addr_match) begin
-                  if (lrwait_reservation_q[monitor_node_idx].is_mwait == 1'b1 &&
-                      lrwait_reservation_q[monitor_node_idx].head_valid == 1'b1) begin
-                    // write occurred on monitored reservation, dispatch monitoring
-                    // updates if head is still valid
-
-                    // head invalid indicates a WakeUp req is already in-flight and
-                    // we do not need to trigger an additional WakeUp chain
-                    monitor_triggered_d = 1'b1;
-                  end
-                end
               end
 
               // if head and tail match, it was the only node in the queue
@@ -729,7 +720,7 @@ module tcdm_adapter #(
 
   always_comb begin
     if (colibri_state_q != ColibriIdle ||
-        write_occurred_q == 1'b1) begin
+        (write_occurred_q == 1'b1 && reservation_active_q)) begin
       in_ready_o = 1'b0;
     end else begin
       in_ready_o  = in_valid_o && !in_ready_i ? 1'b0 : 1'b1;
@@ -758,7 +749,8 @@ module tcdm_adapter #(
                     sc_successful_d : (in_write_i || sc_successful_d);
     end
 
-    out_add_o   = (colibri_state_q != ColibriIdle || write_occurred_q) ?
+    out_add_o   = (colibri_state_q != ColibriIdle ||
+                   (write_occurred_q && reservation_active_q)) ?
                   in_address_q : in_address_i;
 
     out_wdata_o = (colibri_state_q != ColibriIdle) ?
