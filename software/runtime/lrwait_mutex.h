@@ -56,6 +56,15 @@ static inline int32_t store_conditional_wait(volatile void* const address, uint3
   return result;
 }
 
+static inline int32_t monitor_wait(volatile void* const address, uint32_t const value)
+{
+  int32_t result;
+  __asm__ __volatile__ ("" : : : "memory");
+  asm volatile("mwait.w %0, %1, (%2)" : "=r"(result) : "r"(value), "r"(address));
+  __asm__ __volatile__ ("" : : : "memory");
+  return result;
+}
+
 static inline int32_t lrwait_try_lock(lr_sc_mutex_t* const mutex)
 {
   if (*mutex)
