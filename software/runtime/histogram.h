@@ -11,7 +11,7 @@
 
 #include "amo_mutex.h"
 #include "encoding.h"
-#include "mcs_mutex.h"
+
 #include "runtime.h"
 #include "synchronization.h"
 
@@ -19,6 +19,10 @@
 #include "lr_sc_mutex.h"
 #elif MUTEX == 5 || MUTEX == 6
 #include "lrwait_mutex.h"
+#endif
+
+#if MUTEX == 2 || MUTEX == 3 || MUTEX == 11
+#include "mcs_mutex.h"
 #endif
 
 #define vector_N (NUM_CORES * 4) // NUM_CORES / 4 * NUM_TCDMBANKS_PER_TILE (=16)
@@ -32,7 +36,7 @@ volatile uint32_t hist_indices[NBINS] __attribute__((section(".l1_prio")));
 #if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
 // amo mutex or LR/SC mutex or LRWait mutex
 amo_mutex_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
-#elif MUTEX == 2 || MUTEX == 3
+#elif MUTEX == 2 || MUTEX == 3 || MUTEX == 11
 // msc mutex or lrwait_software
 mcs_lock_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
 mcs_lock_t* mcs_nodes[NUM_CORES] __attribute__((section(".l1_prio")));
@@ -64,12 +68,12 @@ int32_t initialize_histogram() {
     // initalize mutexes
 #if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
     hist_locks[i] = amo_allocate_mutex();
-#elif MUTEX == 2 || MUTEX == 3
+#elif MUTEX == 2 || MUTEX == 3 || MUTEX == 11
     hist_locks[i] = initialize_mcs_lock();
 #endif
 
   }
-#if MUTEX == 2
+#if MUTEX == 2 || MUTEX == 11
   for (int i = 0; i < NUM_CORES; i++){
     mcs_nodes[i] = initialize_mcs_lock(i);
   }
@@ -166,6 +170,11 @@ static inline void histogram_iteration(uint32_t core_id) {
 #elif MUTEX == 9
   mempool_wait(BACKOFF);
   hist_bins[hist_index] += 1;
+#elif MUTEX == 11
+  // LRWait MCS/Software based LRWait
+  mwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
+  hist_bins[hist_index] += 1;
+  unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
 #endif
 }
 #endif // HISTOGRAM_H

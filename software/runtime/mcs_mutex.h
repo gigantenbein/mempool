@@ -9,6 +9,7 @@
 
 #include "alloc.h"
 #include "amo_mutex.h"
+#include "lrwait_mutex.h"
 #include "runtime.h"
 
 typedef struct mcs_lock_t mcs_lock_t;
@@ -112,6 +113,26 @@ int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
 
     // spin until your node is freed
     mempool_wfi();
+  }
+
+  return 0;
+}
+
+int32_t mwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
+  // check lock and set yourself as tail
+  node->next = NULL;
+  node->locked = 0;
+
+  mcs_lock_t* next = (mcs_lock_t*) amo_swap(&(lock->next), (uint32_t) node);
+
+  if (next != NULL){
+    // set yourself as locked
+    node->locked = 1;
+
+    // append yourself as next node of previous
+    amo_swap(&(next->next), (uint32_t) node);
+
+    monitor_wait(&(node->locked),1);
   }
 
   return 0;
