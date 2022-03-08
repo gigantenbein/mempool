@@ -102,9 +102,10 @@ mcs_lock_t* initialize_lrwait_mcs(uint32_t core_id){
 }
 
 
-int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node){
+int32_t lrwait_mcs(mcs_lock_t *const lock, mcs_lock_t  *const node, uint32_t core_id){
   // check lock and set yourself as tail
   node->next = NULL;
+  node->locked = core_id;
 
   mcs_lock_t* next = (mcs_lock_t*) amo_swap(&(lock->next), (uint32_t) node);
   if (next != NULL){

@@ -75,7 +75,7 @@ int32_t initialize_histogram() {
   }
 #if MUTEX == 2 || MUTEX == 11
   for (int i = 0; i < NUM_CORES; i++){
-    mcs_nodes[i] = initialize_mcs_lock(i);
+    mcs_nodes[i] = initialize_mcs_lock();
   }
 #elif MUTEX == 3
   for (int i = 0; i < NUM_CORES; i++){
@@ -131,7 +131,7 @@ static inline void histogram_iteration(uint32_t core_id) {
   unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
 #elif MUTEX == 3
   // LRWait MCS/Software based LRWait
-  lrwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
+  lrwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id], core_id);
   hist_bins[hist_index] += 1;
   lrwait_wakeup_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
 #elif MUTEX == 4
