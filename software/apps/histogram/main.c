@@ -12,16 +12,20 @@
 #include "synchronization.h"
 
 /*
- * MUTEX == 0 LR/SC
- * MUTEX == 1 amo lock (parametrized)
- * MUTEX == 2 MCS lock
- * MUTEX == 3 LRWait MCS (Software based LRWait)
- * MUTEX == 4 LR/SC lock (parametrized)
- * MUTEX == 5 LRWait lock (parametrized)
- * MUTEX == 6 LRWait vanilla
- * MUTEX == 7 Software backoff (parametrized)
- * MUTEX == 8 hardware aided backoff (parametrized)
- * MUTEX == 9 LOAD/STORE without mutex
+ * MUTEX == 0  LR/SC
+ * MUTEX == 1  amo lock (parametrized)
+ * MUTEX == 2  MCS lock
+ * MUTEX == 3  LRWait MCS (Software based LRWait)
+ * MUTEX == 4  LR/SC lock (parametrized)
+ * MUTEX == 5  LRWait lock (parametrized)
+ * MUTEX == 6  LRWait vanilla
+ * MUTEX == 7  Software backoff (parametrized)
+ * MUTEX == 8  hardware aided backoff (parametrized)
+ * MUTEX == 9  LOAD/STORE without mutex
+ * MUTEX == 11 MWait
+ * MUTEX == 12 AMO ADD
+ * MUTEX == 13 Exponential backoff amo_lock/spin_lock
+ * MUTEX == 14 Exponential backoff LR/SC
  */
 
 /*

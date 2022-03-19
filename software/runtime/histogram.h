@@ -15,7 +15,7 @@
 #include "runtime.h"
 #include "synchronization.h"
 
-#if MUTEX == 0 || MUTEX == 4 ||  MUTEX == 7 || MUTEX == 8
+#if MUTEX == 0 || MUTEX == 4 ||  MUTEX == 7 || MUTEX == 8 || MUTEX == 13
 #include "lr_sc_mutex.h"
 #elif MUTEX == 5 || MUTEX == 6
 #include "lrwait_mutex.h"
@@ -33,7 +33,7 @@ volatile uint32_t hist_bins[vector_N] __attribute__((section(".l1_prio")));
 // pick random indices for the histogram bins
 volatile uint32_t hist_indices[NBINS] __attribute__((section(".l1_prio")));
 
-#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
+#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5 || MUTEX == 12
 // amo mutex or LR/SC mutex or LRWait mutex
 amo_mutex_t* hist_locks[NBINS] __attribute__((section(".l1_prio")));
 #elif MUTEX == 2 || MUTEX == 3 || MUTEX == 11
@@ -66,7 +66,7 @@ int32_t initialize_histogram() {
     hist_indices[i] = drawn_number;
 
     // initalize mutexes
-#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5
+#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5 || MUTEX == 12
     hist_locks[i] = amo_allocate_mutex();
 #elif MUTEX == 2 || MUTEX == 3 || MUTEX == 11
     hist_locks[i] = initialize_mcs_lock();
@@ -175,6 +175,21 @@ static inline void histogram_iteration(uint32_t core_id) {
   mwait_mcs(hist_locks[drawn_number], mcs_nodes[core_id]);
   hist_bins[hist_index] += 1;
   unlock_mcs(hist_locks[drawn_number], mcs_nodes[core_id], BACKOFF);
+#elif MUTEX == 12
+  // Amo lock
+  amo_expbackoff_lock_mutex(hist_locks[drawn_number], BACKOFF);
+  hist_bins[hist_index] += 1;
+  amo_unlock_mutex(hist_locks[drawn_number]);
+#elif MUTEX == 13
+  uint32_t backoff_factor = 1;
+  bin_value = load_reserved((hist_bins + hist_index)) + 1;
+  while(store_conditional((hist_bins+hist_index), bin_value)) {
+    mempool_wait(backoff_factor * BACKOFF);
+    backoff_factor += 1;
+    bin_value = load_reserved((hist_bins + hist_index)) + 1;
+  }
+#elif MUTEX == 14
+  amo_add(hist_bins + hist_index, 1);
 #endif
 }
 #endif // HISTOGRAM_H

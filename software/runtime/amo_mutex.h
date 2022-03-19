@@ -67,6 +67,14 @@ static inline void amo_lock_mutex(amo_mutex_t *mutex, uint32_t backoff) {
   }
 }
 
+static inline void amo_expbackoff_lock_mutex(amo_mutex_t *mutex, uint32_t backoff) {
+  uint32_t backoff_factor = 1;
+  while (amo_try_lock(mutex)) {
+    mempool_wait(backoff_factor * backoff);
+    backoff_factor += 1;
+  }
+}
+
 //
 // Unlock the specified mutex.
 //

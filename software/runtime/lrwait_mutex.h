@@ -67,23 +67,20 @@ static inline int32_t monitor_wait(volatile void* const address, uint32_t const 
 
 static inline int32_t lrwait_try_lock(lr_sc_mutex_t* const mutex)
 {
-  if (*mutex)
-    {
-      return 1;
-    }
-  else
-    {
-      load_reserved_wait(mutex);
-      return store_conditional_wait(mutex, 1);
-    }
+  if (*mutex) {
+    return 1;
+  }
+  else {
+    load_reserved_wait(mutex);
+    return store_conditional_wait(mutex, 1);
+  }
 }
 
 static inline void lrwait_lock_mutex(lr_sc_mutex_t* const mutex,   uint32_t backoff)
 {
-  while(lrwait_try_lock(mutex))
-    {
-      mempool_wait(backoff);
-    }
+  while(lrwait_try_lock(mutex)) {
+    mempool_wait(backoff);
+  }
 }
 
 static inline void lrwait_unlock_mutex(lr_sc_mutex_t* const mutex)
