@@ -306,7 +306,7 @@ module tcdm_adapter #(
       );
 
     end else begin : single_lrwait_node // block: gen_multip_lrwait_nodes
-      assign lrwait_node_idx            = 1'b0;
+      assign lrwait_node_idx     = 1'b0;
       assign monitor_node_idx    = 1'b0;
       assign all_nodes_full      = 1'b0;
       assign lrwait_addr_match   = 1'b1;

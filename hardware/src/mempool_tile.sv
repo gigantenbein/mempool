@@ -259,11 +259,13 @@ module mempool_tile
     assign bank_resp_payload[b].rdata.amo     = '0; // Don't care
 
     tcdm_adapter #(
-      .AddrWidth  (TCDMAddrMemWidth),
-      .DataWidth  (DataWidth       ),
-      .metadata_t (bank_metadata_t ),
-      .LrScEnable (LrScEnable      ),
-      .RegisterAmo(1'b0            )
+      .AddrWidth    (TCDMAddrMemWidth),
+      .DataWidth    (DataWidth       ),
+      .metadata_t   (bank_metadata_t ),
+      .LrScEnable   (LrScEnable      ),
+      .LrWaitEnable (LrWaitEnable    ),
+      .NumLrWaitAddr(NumLrWaitAddr   ),
+      .RegisterAmo  (1'b0            )
     ) i_tcdm_adapter (
       .clk_i       (clk_i                                                                       ),
       .rst_ni      (rst_ni                                                                      ),
