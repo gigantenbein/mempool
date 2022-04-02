@@ -30,6 +30,7 @@
 // allocate bins accross all TCDM banks
 volatile uint32_t hist_bins[vector_N] __attribute__((section(".l1_prio")));
 
+
 // pick random indices for the histogram bins
 volatile uint32_t hist_indices[NBINS] __attribute__((section(".l1_prio")));
 
@@ -71,8 +72,55 @@ int32_t initialize_histogram() {
 #elif MUTEX == 2 || MUTEX == 3 || MUTEX == 11
     hist_locks[i] = initialize_mcs_lock();
 #endif
-
   }
+
+  // set all bins to zero again
+  for (uint32_t i = 0; i < vector_N; i++) {
+    hist_bins[i] = 0;
+  }
+
+#if MUTEX == 2 || MUTEX == 11
+  for (int i = 0; i < NUM_CORES; i++){
+    mcs_nodes[i] = initialize_mcs_lock();
+  }
+#elif MUTEX == 3
+  for (int i = 0; i < NUM_CORES; i++){
+    // pass core_id to lock to indicate which node
+    // has to be woken up
+    mcs_nodes[i] = initialize_lrwait_mcs(i);
+  }
+#endif
+  return 0;
+}
+
+int32_t initialize_statichistogram() {
+  uint32_t drawn_number = 0;
+  uint32_t random_number = 0;
+  // Initialize series of bins and all of them to zero
+  for (uint32_t i = 0; i < vector_N; i++) {
+    hist_bins[i] = 0;
+  }
+
+  if (NBINS > vector_N) {
+    // make sure we have enough spots for our bins
+    return -1;
+  }
+
+  for (int i = 0; i<NBINS; i++){
+    hist_indices[i] = i;
+    // initalize mutexes
+#if MUTEX == 1 || MUTEX == 4 || MUTEX == 5 || MUTEX == 12
+    hist_locks[i] = amo_allocate_mutex();
+#elif MUTEX == 2 || MUTEX == 3 || MUTEX == 11
+    hist_locks[i] = initialize_mcs_lock();
+#endif
+  }
+
+  // set all bins to zero again
+  for (uint32_t i = 0; i < vector_N; i++) {
+    hist_bins[i] = 0;
+  }
+
 #if MUTEX == 2 || MUTEX == 11
   for (int i = 0; i < NUM_CORES; i++){
     mcs_nodes[i] = initialize_mcs_lock();

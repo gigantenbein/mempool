@@ -42,8 +42,6 @@
 
 volatile uint32_t check_iter __attribute__((section(".l1_prio")));
 
-
-
 int main() {
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
@@ -54,23 +52,19 @@ int main() {
   mempool_init(core_id, num_cores);
 
   if (core_id == 0){
-    initialize_histogram();
+    initialize_statichistogram();
     check_iter  = 0;
   }
 
   mempool_barrier(num_cores);
 
   uint32_t hist_iterations = 0;
-  uint32_t random = 0;
   mempool_timer_t countdown = 0;
 
   mempool_barrier(num_cores);
   mempool_timer_t start_time = mempool_get_timer();
 
   while(countdown < NUMCYCLES + start_time) {
-    asm volatile("csrr %0, mscratch" : "=r"(random));
-    random = random % 10;
-    mempool_wait(random*10);
     histogram_iteration(core_id);
     hist_iterations++;
     countdown = mempool_get_timer();

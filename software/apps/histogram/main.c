@@ -5,7 +5,7 @@
 // Author: Marc Gantenbein, ETH Zurich
 #include <stdint.h>
 #include <string.h>
-
+#include "amo_mutex.h"
 #include "encoding.h"
 #include "histogram.h"
 #include "runtime.h"
@@ -40,6 +40,10 @@
  * NBINS: How many bins are accessed?
  */
 
+volatile uint32_t check_iter __attribute__((section(".l1_prio")));
+
+
+
 int main() {
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
@@ -51,6 +55,7 @@ int main() {
 
   if (core_id == 0){
     initialize_histogram();
+    check_iter  = 0;
   }
 
   mempool_barrier(num_cores);
@@ -70,6 +75,8 @@ int main() {
   write_csr(time, hist_iterations);
 
   mempool_barrier(num_cores);
+  amo_add(&check_iter, hist_iterations);
+  mempool_barrier(num_cores);
 
   if(core_id == 0) {
     uint32_t sum = 0;
@@ -77,6 +84,7 @@ int main() {
       sum += *(hist_bins+i);
     }
     write_csr(90, sum);
+    write_csr(91, check_iter);
   }
 
   // wait until all cores have finished
